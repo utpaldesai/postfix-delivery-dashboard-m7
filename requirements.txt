@@ -1,0 +1,8 @@
+# Runtime Python dependencies for Postfix Delivery Dashboard M7 Enterprise.
+# Keep this file in sync with imports used by app/ and the Dockerfile.
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+PyMySQL>=1.1,<2.0
+
+geoip2>=4.8,<6.0
+extract-msg>=0.48,<1.0

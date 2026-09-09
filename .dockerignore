@@ -1,0 +1,8 @@
+.env
+data
+__pycache__
+*.pyc
+*.zip
+# Test suite is not part of the production image
+tests/
+test*.py

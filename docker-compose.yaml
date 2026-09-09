@@ -1,0 +1,157 @@
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: postfix-dashboard-db
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Kolkata}
+      MARIADB_DATABASE: ${DB_NAME:-postfix_reports}
+      MARIADB_USER: ${DB_USER:-postfix_app}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-3307}:3306"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mariadb-admin ping -h 127.0.0.1 -uroot -p$$MARIADB_ROOT_PASSWORD --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - postfix-net
+
+  app:
+    build: .
+    image: postfix-delivery-dashboard:m7
+    container_name: postfix-dashboard
+    restart: unless-stopped
+    network_mode: host
+    group_add:
+      # Quarantine access group (existing behavior).
+      - "${AMAVIS_GID:-130}"
+      # Host /var/lib/amavis/logs/amavis.log is amavis:adm 0640.
+      # Ubuntu adm is normally GID 4; override from .env if different.
+      - "${AMAVIS_LOG_GID:-4}"
+      # /var/log/mail.log is normally adm-readable too, so reuse AMAVIS_LOG_GID.
+      - "${ROUNDCUBE_LOG_GID:-33}"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Kolkata}
+      WEB_PORT: ${WEB_PORT:-8095}
+      LOG_FILE: /host-logs/mail.log
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${DB_HOST_PORT:-3307}
+      DB_NAME: ${DB_NAME:-postfix_reports}
+      DB_USER: ${DB_USER:-postfix_app}
+      DB_PASSWORD: ${DB_PASSWORD}
+      WEB_USERNAME: ${WEB_USERNAME:-admin}
+      WEB_PASSWORD: ${WEB_PASSWORD}
+      SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-15}
+      SESSION_ABSOLUTE_TIMEOUT_HOURS: ${SESSION_ABSOLUTE_TIMEOUT_HOURS:-8}
+      LOGIN_RATE_LIMIT_ATTEMPTS: ${LOGIN_RATE_LIMIT_ATTEMPTS:-5}
+      LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+      LOGIN_RATE_LIMIT_LOCKOUT_SECONDS: ${LOGIN_RATE_LIMIT_LOCKOUT_SECONDS:-300}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-postfix_dashboard_session}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      INITIAL_IMPORT_LINES: ${INITIAL_IMPORT_LINES:-50000}
+      INGEST_CHECKPOINT_FILE: /data/reader/mail-log-checkpoint.json
+      INGEST_CHECKPOINT_FLUSH_SECONDS: ${INGEST_CHECKPOINT_FLUSH_SECONDS:-2}
+      INGEST_CHECKPOINT_FLUSH_LINES: ${INGEST_CHECKPOINT_FLUSH_LINES:-100}
+      POSTFIX_INGEST_SOURCE_KEY: ${POSTFIX_INGEST_SOURCE_KEY:-production-postfix-log}
+      POSTFIX_INGEST_BATCH_LINES: ${POSTFIX_INGEST_BATCH_LINES:-250}
+      POSTFIX_INGEST_POLL_SECONDS: ${POSTFIX_INGEST_POLL_SECONDS:-0.5}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      HOME_DOMAINS: ${HOME_DOMAINS:?HOME_DOMAINS must be set in .env}
+      SPAM_PREF_DB_HOST: ${SPAM_PREF_DB_HOST:-127.0.0.1}
+      SPAM_PREF_DB_PORT: ${SPAM_PREF_DB_PORT:-3306}
+      SPAM_PREF_DB_NAME: ${SPAM_PREF_DB_NAME:-maildb}
+      SPAM_PREF_DB_USER: ${SPAM_PREF_DB_USER:-spam}
+      SPAM_PREF_DB_PASSWORD: ${SPAM_PREF_DB_PASSWORD:-}
+      MAIL_SIZE_API_URL: ${MAIL_SIZE_API_URL:-http://127.0.0.1/mail-size-api.php}
+      MAIL_SIZE_API_KEY: ${MAIL_SIZE_API_KEY:-}
+      MAIL_SIZE_API_TIMEOUT: ${MAIL_SIZE_API_TIMEOUT:-10}
+      QUARANTINE_DIR: /host-amavis/virusmails
+      AMAVIS_LOG: /host-amavis/logs/amavis.log
+      AMAVIS_INGEST_SOURCE_KEY: ${AMAVIS_INGEST_SOURCE_KEY:-production-amavis-log}
+      AMAVIS_INGEST_BATCH_LINES: ${AMAVIS_INGEST_BATCH_LINES:-250}
+      AMAVIS_INGEST_POLL_SECONDS: ${AMAVIS_INGEST_POLL_SECONDS:-1}
+      DOVECOT_MAIL_LOG: /host-dovecot/mail.log
+      ROUNDCUBE_LOGIN_LOG: /host-roundcube/userlogins.log
+      MONITOR_LOG_TAIL_BYTES: ${MONITOR_LOG_TAIL_BYTES:-2097152}
+      MONITOR_LOG_MAX_LINES: ${MONITOR_LOG_MAX_LINES:-10000}
+      MONITOR_INGEST_BATCH_BYTES: ${MONITOR_INGEST_BATCH_BYTES:-1048576}
+      MONITOR_SYNC_SECONDS: ${MONITOR_SYNC_SECONDS:-30}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-8}
+      DB_POOL_WAIT_SECONDS: ${DB_POOL_WAIT_SECONDS:-10}
+      QUARANTINE_STATE_DIR: /data/amavis-mgr
+      QUARANTINE_LOOKBACK_DAYS: ${QUARANTINE_LOOKBACK_DAYS:-6}
+      QUARANTINE_CACHE_REFRESH: ${QUARANTINE_CACHE_REFRESH:-300}
+      QUARANTINE_ITEMS_PER_PAGE: ${QUARANTINE_ITEMS_PER_PAGE:-20}
+      AMAVIS_PDP_SERVER: 127.0.0.1:9998
+      AMAVIS_RELEASE_TIMEOUT: ${AMAVIS_RELEASE_TIMEOUT:-30}
+      AMAVIS_RELEASE_SOURCE: /opt/host-amavis/amavisd-release
+      AMAVIS_RELEASE_CMD: /usr/local/bin/amavisd-release-wrapper
+      SA_LEARN_ENABLED: ${SA_LEARN_ENABLED:-true}
+      SA_LEARN_ON_MARK_SPAM: ${SA_LEARN_ON_MARK_SPAM:-true}
+      SA_LEARN_USER: ${SA_LEARN_USER:-amavis}
+      SA_LEARN_TIMEOUT: ${SA_LEARN_TIMEOUT:-90}
+      SA_LEARN_MAX_SIZE: ${SA_LEARN_MAX_SIZE:-0}
+      SA_LEARN_CMD: /usr/bin/sa-learn
+      AI_TRAINER_ENABLED: ${AI_TRAINER_ENABLED:-true}
+      AI_TRAINER_MIN_PER_CLASS: ${AI_TRAINER_MIN_PER_CLASS:-10}
+      AI_TRAINER_MAX_FEATURES: ${AI_TRAINER_MAX_FEATURES:-2048}
+      AI_TRAINER_TOKEN_BUCKETS: ${AI_TRAINER_TOKEN_BUCKETS:-16384}
+      AI_TRAINER_AUTO_TRAIN_AFTER_NEW_LABELS: ${AI_TRAINER_AUTO_TRAIN_AFTER_NEW_LABELS:-250}
+      AI_TRAINER_LOGISTIC_EPOCHS: ${AI_TRAINER_LOGISTIC_EPOCHS:-12}
+      AI_TRAINER_LOGISTIC_LR: ${AI_TRAINER_LOGISTIC_LR:-0.08}
+      AI_TRAINER_LOGISTIC_L2: ${AI_TRAINER_LOGISTIC_L2:-0.0001}
+      AI_AMAVIS_HOOK_MODE: ${AI_AMAVIS_HOOK_MODE:-disabled}
+      AI_AMAVIS_HOOK_ENDPOINT: ${AI_AMAVIS_HOOK_ENDPOINT:-/api/ai/amavis-hook/v1}
+      GEOIP_CITY_DB: ${GEOIP_CITY_DB:-/data/geoip/GeoLite2-City.mmdb}
+      GEOIP_ASN_DB: ${GEOIP_ASN_DB:-/data/geoip/GeoLite2-ASN.mmdb}
+      EMAIL_ANALYSIS_MAX_BYTES: ${EMAIL_ANALYSIS_MAX_BYTES:-2097152}
+      AMAVIS_DRY_RUN_ENABLED: ${AMAVIS_DRY_RUN_ENABLED:-false}
+      AMAVIS_DRY_RUN_HELPER_URL: ${AMAVIS_DRY_RUN_HELPER_URL:-http://127.0.0.1:10081/amavis-dry-run}
+      AMAVIS_DRY_RUN_TIMEOUT: ${AMAVIS_DRY_RUN_TIMEOUT:-20}
+      AMAVIS_DRY_RUN_ALLOW_REMOTE: ${AMAVIS_DRY_RUN_ALLOW_REMOTE:-false}
+    volumes:
+      - /usr/sbin/amavisd-release:/opt/host-amavis/amavisd-release:ro
+      - ${HOST_MAIL_LOG:-/var/log/postfix.log}:/host-logs/mail.log:ro
+      - ${AMAVIS_QUARANTINE_DIR:-/var/lib/amavis/virusmails}:/host-amavis/virusmails:ro
+      - ${AMAVIS_LOG_DIR:-/var/lib/amavis/logs}:/host-amavis/logs:ro
+      - ${DOVECOT_MAIL_LOG_FILE:-/var/log/mail.log}:/host-dovecot/mail.log:ro
+      - ${ROUNDCUBE_LOGIN_LOG_FILE:-/var/lib/roundcube/logs/userlogins.log}:/host-roundcube/userlogins.log:ro
+      - ${SPAMASSASSIN_CONFIG_DIR:-/etc/spamassassin}:/etc/spamassassin:ro
+      - ./data/amavis-mgr:/data/amavis-mgr
+      - ./data/reader:/data/reader
+      - ./data/geoip:/data/geoip:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: ${APP_PIDS_LIMIT:-256}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('WEB_PORT','8095')+'/health/live',timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+networks:
+  postfix-net:
+    driver: bridge

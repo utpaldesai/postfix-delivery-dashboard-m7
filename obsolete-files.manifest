@@ -1,0 +1,4 @@
+# R1.1.9 explicitly removed historical files. Paths are relative to /opt/postfix-dashboard.
+app/amavis_wb.py
+tests/test-m7-ai-r1-1-5-amavis-global-wb.py
+app/assets/mail-flow-complete-system.png
