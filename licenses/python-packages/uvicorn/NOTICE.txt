@@ -1,0 +1,4 @@
+Package: uvicorn
+Reference version used to capture license text: 0.48.0
+License: BSD-3-Clause
+Runtime dependency version may differ; run ../../collect-runtime-licenses.sh against the built image.

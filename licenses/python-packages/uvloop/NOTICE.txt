@@ -1,0 +1,4 @@
+Package: uvloop
+Reference version used to capture license text: 0.22.1
+License: MIT License
+Runtime dependency version may differ; run ../../collect-runtime-licenses.sh against the built image.

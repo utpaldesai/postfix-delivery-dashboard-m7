@@ -1,0 +1,4 @@
+Package: annotated-types
+Reference version used to capture license text: 0.7.0
+License: See copied license file(s)
+Runtime dependency version may differ; run ../../collect-runtime-licenses.sh against the built image.

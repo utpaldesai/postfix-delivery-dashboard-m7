@@ -1,0 +1,4 @@
+Package: h11
+Reference version used to capture license text: 0.16.0
+License: MIT
+Runtime dependency version may differ; run ../../collect-runtime-licenses.sh against the built image.

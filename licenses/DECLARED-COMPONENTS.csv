@@ -1,0 +1,14 @@
+Component,Version,Role,License,License/Notice
+Python,3.12-slim,Runtime,PSF License v2,texts/PSF-Python-License.txt
+FastAPI,0.116.1,Web/API,MIT,python-packages/fastapi/
+Uvicorn,0.35.0 [standard],ASGI server,BSD-3-Clause,python-packages/uvicorn/
+PyMySQL,1.1.1,DB client,MIT,texts/MIT.txt
+MariaDB Community Server,10.11,Dashboard DB,GPL-2.0,texts/GPL-2.0.txt
+Apache SpamAssassin,build-resolved,Spam/Bayes,Apache-2.0,texts/Apache-2.0.txt
+Perl,build-resolved,Runtime,Artistic/GPL,texts/Artistic-1.0.txt + texts/GPL-1.0.txt
+DBD::mysql,build-resolved,Perl MySQL driver,Same terms as Perl,runtime report
+BSD::Resource,build-resolved,Resource limits,Artistic-2.0 OR LGPL-2.0,texts/Artistic-2.0.txt + texts/LGPL-2.0.txt
+Archive::Zip,build-resolved,ZIP support,Same terms as Perl,runtime report
+IO::Stringy,build-resolved,IO support,Same terms as Perl,runtime report
+ca-certificates,build-resolved,TLS trust,Package/certificate-specific,runtime report
+Docker Engine/Compose,deployment prerequisite,Container runtime,Apache-2.0 source license,texts/Apache-2.0.txt

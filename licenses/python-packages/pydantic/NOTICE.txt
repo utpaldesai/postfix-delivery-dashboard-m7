@@ -1,0 +1,4 @@
+Package: pydantic
+Reference version used to capture license text: 2.13.4
+License: MIT
+Runtime dependency version may differ; run ../../collect-runtime-licenses.sh against the built image.

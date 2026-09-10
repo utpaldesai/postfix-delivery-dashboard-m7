@@ -1,0 +1,4 @@
+Package: click
+Reference version used to capture license text: 8.1.8
+License: See copied license file(s)
+Runtime dependency version may differ; run ../../collect-runtime-licenses.sh against the built image.
