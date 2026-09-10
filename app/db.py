@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS ai_ground_truth_history (
     label VARCHAR(8) NOT NULL,
     classification VARCHAR(64) NOT NULL DEFAULT '',
     review_reason VARCHAR(512) NOT NULL DEFAULT '',
+    admin_notes TEXT NOT NULL,
     reviewer VARCHAR(128) NOT NULL DEFAULT '',
     label_source VARCHAR(64) NOT NULL DEFAULT 'admin-ground-truth',
     status VARCHAR(32) NOT NULL DEFAULT 'CURRENT',
@@ -888,6 +889,11 @@ def init():
                     for statement in AI_GROUND_TRUTH_SCHEMA.split(";"):
                         if statement.strip():
                             cursor.execute(statement)
+                    # Forward-only R1.1.49: preserve optional admin notes with the
+                    # authoritative ground-truth state. Existing rows/data are untouched.
+                    cursor.execute("SHOW COLUMNS FROM ai_ground_truth_history LIKE 'admin_notes'")
+                    if not cursor.fetchone():
+                        cursor.execute("ALTER TABLE ai_ground_truth_history ADD COLUMN admin_notes TEXT NOT NULL AFTER review_reason")
                     for statement in AI_TRAINER_STATUS_SCHEMA.split(";"):
                         if statement.strip():
                             cursor.execute(statement)
@@ -2541,7 +2547,7 @@ def replace_ai_trainer_status_snapshot(*, generation_id, dataset_samples, ham_la
         connection.commit()
 
 
-def record_ai_ground_truth_history(*, source_sha256, pdp_id, label, classification='', review_reason='', reviewer='', label_source='admin-ground-truth', generation_id='', feature_schema=0):
+def record_ai_ground_truth_history(*, source_sha256, pdp_id, label, classification='', review_reason='', admin_notes='', reviewer='', label_source='admin-ground-truth', generation_id='', feature_schema=0):
     """Persist immutable label history; only one CURRENT row per message is maintained logically."""
     source_sha256=str(source_sha256 or '').strip()
     if not source_sha256:
@@ -2562,9 +2568,9 @@ def record_ai_ground_truth_history(*, source_sha256, pdp_id, label, classificati
                 cursor.execute("UPDATE ai_ground_truth_history SET status='SUPERSEDED' WHERE id=%s", (prev['id'],))
             cursor.execute(
                 """INSERT INTO ai_ground_truth_history
-                (source_sha256,pdp_id,label,classification,review_reason,reviewer,label_source,status,previous_label,reversal_count,generation_id,feature_schema)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,'CURRENT',%s,%s,%s,%s)""",
-                (source_sha256,str(pdp_id or ''),label,str(classification or ''),str(review_reason or '')[:512],str(reviewer or ''),str(label_source or ''),previous_label,reversal_count,str(generation_id or ''),int(feature_schema or 0)),
+                (source_sha256,pdp_id,label,classification,review_reason,admin_notes,reviewer,label_source,status,previous_label,reversal_count,generation_id,feature_schema)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'CURRENT',%s,%s,%s,%s)""",
+                (source_sha256,str(pdp_id or ''),label,str(classification or ''),str(review_reason or '')[:512],str(admin_notes or '')[:1000],str(reviewer or ''),str(label_source or ''),previous_label,reversal_count,str(generation_id or ''),int(feature_schema or 0)),
             )
             row_id=cursor.lastrowid
         connection.commit()
@@ -2592,11 +2598,25 @@ def store_ai_conflict_investigation(*, source_sha256, pdp_id='', candidate_versi
         connection.commit()
     return row_id
 
-def ai_ground_truth_current(source_sha256):
+def ai_ground_truth_current(source_sha256='', pdp_id=''):
+    """Return the authoritative CURRENT admin decision.
+
+    Prefer immutable source SHA-256, with pdp_id as a safe fallback so reopening
+    Quarantine Intelligence still restores the stored decision if the retained
+    quarantine representation changes while the logical quarantine item is the same.
+    """
+    sha=str(source_sha256 or '').strip()
+    pid=str(pdp_id or '').strip()
     with conn() as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM ai_ground_truth_history WHERE source_sha256=%s AND status='CURRENT' ORDER BY id DESC LIMIT 1", (str(source_sha256 or ''),))
-            return cursor.fetchone() or None
+            row=None
+            if sha:
+                cursor.execute("SELECT * FROM ai_ground_truth_history WHERE source_sha256=%s AND status='CURRENT' ORDER BY id DESC LIMIT 1", (sha,))
+                row=cursor.fetchone()
+            if not row and pid:
+                cursor.execute("SELECT * FROM ai_ground_truth_history WHERE pdp_id=%s AND status='CURRENT' ORDER BY id DESC LIMIT 1", (pid,))
+                row=cursor.fetchone()
+            return row or None
 
 def recent_ai_conflicts(limit=50):
     with conn() as connection:

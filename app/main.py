@@ -70,6 +70,7 @@ from .db import (
     fraud_repo_status,
     ai_ti_status,
     record_ai_ground_truth_calibration,
+    ai_ground_truth_current,
     get_postfix_ingest_state,
     set_postfix_ingest_state,
     store_postfix_raw_events_batch,
@@ -1638,6 +1639,17 @@ def quarantine_intelligence(
         result["ai"] = {"enabled": True, "shadow_only": True, "available": False, "reason": str(exc)[:200]}
         result.setdefault("fraud_intelligence", {"enabled": True, "shadow_only": True, "available": False, "reason": "Fraud intelligence unavailable"})
         result.setdefault("threat_intelligence", {"enabled": True, "shadow_only": True, "available": False, "reason": "Three-tier intelligence unavailable"})
+
+    # Restore authoritative Set-2 administrator ground truth independently of
+    # prediction/fraud/threat-intelligence availability.  A failure in any
+    # shadow analysis must never hide a previously stored Admin Decision.
+    result["admin_ground_truth"] = {}
+    try:
+        gt_source_path = quarantine_source_path(pdp_id)
+        source_sha256 = hashlib.sha256(gt_source_path.read_bytes()).hexdigest()
+        result["admin_ground_truth"] = ai_ground_truth_current(source_sha256, pdp_id=pdp_id) or {}
+    except Exception as exc:
+        result["admin_ground_truth_error"] = str(exc)[:200]
     return result
 
 
@@ -1832,7 +1844,7 @@ async def ai_trainer_ground_truth_api(
         acknowledged=bool(proposed_label and label==proposed_label and classification==proposed_classification)
         result=ai_record_human_label(
             pdp_id=pdp_id, label=label, source_path=source_path, item=item,
-            username=username, source=("admin-ai-acknowledged" if acknowledged else "admin-ground-truth-ui"), classification=classification, review_reason=review_reason,
+            username=username, source=("admin-ai-acknowledged" if acknowledged else "admin-ground-truth-ui"), classification=classification, review_reason=review_reason, admin_notes=admin_notes,
         )
         calibration_id=record_ai_ground_truth_calibration(
             source_sha256=result.get("source_sha256",""), pdp_id=pdp_id, ai_proposed_label=proposed_label,
@@ -1841,7 +1853,17 @@ async def ai_trainer_ground_truth_api(
             generation_id=str(proposal.get("generation_id") or ""), candidate_version=str(proposal.get("model_version") or ""),
             fraud_repo_version=str(fraud.get("repo_version") or ""),
         )
-        result.update({"calibration_id":calibration_id,"ai_proposed_label":proposed_label,"ai_proposed_classification":proposed_classification,"admin_acknowledged_ai":acknowledged})
+        # Read-after-write verification: the UI may report success only when the
+        # authoritative MariaDB CURRENT row can be read back with the exact admin
+        # decision/classification that was submitted.
+        persisted=ai_ground_truth_current(result.get("source_sha256", ""), pdp_id=pdp_id) or {}
+        if str(persisted.get("label") or "").upper()!=label or str(persisted.get("classification") or "").upper()!=classification:
+            raise RuntimeError("Admin Ground Truth persistence verification failed")
+        result.update({
+            "calibration_id":calibration_id,"ai_proposed_label":proposed_label,
+            "ai_proposed_classification":proposed_classification,"admin_acknowledged_ai":acknowledged,
+            "admin_ground_truth":persisted,"reviewer":username,
+        })
         quarantine_write_audit("AI_GROUND_TRUTH", pdp_id, remote_addr, username, detail=json.dumps({"label":label,"classification":classification,"ai_proposed_label":proposed_label,"ai_proposed_classification":proposed_classification,"acknowledged":acknowledged,"reversal":result.get("reversal"),"conflict_investigation_id":result.get("conflict_investigation_id"),"calibration_id":calibration_id,"admin_notes":admin_notes})[:1000])
         return result
     except ValueError:
@@ -4509,7 +4531,11 @@ body.sidebar-collapsed .sidebar-foot{display:none}
 .qintel-live-grid{align-items:stretch}
 .qintel-live-panel{height:100%;min-width:0;box-sizing:border-box}
 .qintel-ai-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:stretch}
+.qintel-ai-metrics.qintel-ai-metrics-single{grid-template-columns:minmax(0,1fr)}
 .qintel-ai-metric{min-width:0;height:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:9px;background:#fff;padding:10px}
+.qintel-ai-metrics-single .qintel-ai-metric{width:100%}
+.qintel-live-grid>.qintel-live-panel,.qintel-ai-metrics>.qintel-ai-metric{align-self:stretch}
+.qintel-live-grid .qintel-kv,.qintel-ai-metrics .qintel-ai-grid{width:100%}
 .qintel-ai-metric h4{margin:0 0 8px;font-size:11px;color:#0f172a}
 .qintel-ai-grid{display:grid;grid-template-columns:145px minmax(0,1fr);gap:7px 10px;align-items:start;font-size:10px}
 .qintel-ai-grid span{color:#64748b;min-width:0}
@@ -5807,7 +5833,7 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <section class="help-card"><h3>Delivery</h3><p>Shows final delivery states only. Search by Queue ID, sender, recipient, delivery target or detail. The visible page loads first using server-side pagination; global counters refresh afterward so they do not block the table. Search typing is debounced and superseded requests are cancelled. Click a Queue ID for the mail-flow timeline when Mail Flow access is permitted.</p></section>
     <section class="help-card"><h3>Summary</h3><p>Displays mail direction totals and a compact Daily Bounced Domain Summary with Sent, Recv and Total columns. R1.1.44 serves bounce summary and drill-down from an additive indexed <code>postfix_bounce_projection</code>, avoiding repeated timestamp/domain expression scans across the complete delivery table. The authoritative <code>postfix_delivery_final</code> data is preserved and new terminal bounces update the projection transactionally. Sent and Recv counts still drill down to the underlying bounced-message evidence for the selected date and domain. The retired Home-Domain Email ID MIS remains intentionally absent because log-derived address strings are not an authoritative mailbox directory.</p></section>
     <section class="help-card"><h3>Amavis Quarantine</h3><p>Review Spam, Virus and Banned objects with category filters, message metadata and bulk selection. Release remains separate from learning. Learn Spam and Learn Ham use the restricted host SpamAssassin learning path and update the existing production Bayes database through sa-learn.</p></section>
-    <section class="help-card"><h3>Quarantine Intelligence</h3><p>Provides a compact forensic view for quarantined messages. The SpamAssassin evidence card shows final and required scores, verdict, SPF/DKIM/DMARC, Bayes evidence, top positive contributors, negative/trust rules and the complete test list. GEO-IP intelligence shows the observed public source IP and, when local MaxMind databases are installed, country/city and ASN details.</p></section>
+    <section class="help-card"><h3>Quarantine Intelligence</h3><p>Provides a compact forensic view for quarantined messages. The SpamAssassin evidence card shows final and required scores, verdict, SPF/DKIM/DMARC, Bayes evidence, top positive contributors, negative/trust rules and the complete test list. GEO-IP intelligence shows the observed public source IP and, when local MaxMind databases are installed, country/city and ASN details.</p><p><b>Ground-truth persistence:</b> saved Mail Admin HAM/SPAM decisions, classification, review/reversal reason and notes are restored from MariaDB when the same quarantine item is reopened. A save is reported successful only after the exact Admin Decision is read back from the authoritative CURRENT MariaDB row; shadow AI analysis failures cannot hide an already stored decision. Saved administrator ground truth takes precedence over the AI proposal. Independent attachment intelligence performs bounded local ZIP member inspection, including nested ZIPs and dangerous embedded script/executable extensions; members are never executed and Amavis/SpamAssassin verdicts are not used as AI features.</p></section>
     <section class="help-card"><h3>AI Trainer Flow &amp; Intelligence Layout</h3><p>Use the architecture buttons at the top of Help to open these diagrams. The live AI Trainer Flow visualizes the complete independent-g1 path: incoming mail → schema-v4 feature extraction → Message / Infrastructure / Campaign AI → correlation → shadow prediction → admin review and ground truth → database → eligible dataset → candidate training/validation → 7-day calibration. Operational, development and future/data-building capabilities are visually distinguished. Live values refresh from the authenticated trainer status API.</p></section>
     <section class="help-card"><h3>AI Shadow Intelligence</h3><p>The AI trainer is shadow-only and independent of SpamAssassin/Amavis classification. AI inference uses raw-message NLP/text, sender/header relationships, independently parsed SPF/DKIM/DMARC evidence, URL/domain structure, MIME/attachment metadata and hard-HAM weighting. SpamAssassin score, rule hits, X-Spam headers, Amavis verdict/category and quarantine state are excluded from the AI feature vector and remain visible only as a separate human-review result. Approved Learn Ham/Learn Spam actions provide the human label after the action succeeds. Schema-4 training adds local contextual phrase families and privacy-reduced stylometric/structural signals and can non-destructively re-extract retained legacy labels from their quarantine source; legacy feature rows remain archived. Automatic training never promotes or activates a model; explicit promotion affects shadow prediction only.</p></section>
     <section class="help-card"><h3>Email Analysis</h3><p>Email Analysis is calibrated to the AI Trainer. Paste RFC822 source or upload/drag an .eml file or a native Microsoft Outlook .msg file; when a current-generation candidate exists, the workbench uses that candidate for SHADOW ONLY inspection and displays its generation, schema and algorithm. The page uses a balanced full-width input layout followed by side-by-side Independent AI and Amavis / SpamAssassin Dry Run cards, a comparison strip, and supporting authentication/campaign evidence. The dry-run adapter is disabled until an explicitly configured analysis-only helper is available; it never submits to production Amavis SMTP port 10024. Message AI, Infrastructure AI and Campaign AI remain independent of SpamAssassin/Amavis decisions. Uploaded message content is temporary and is not added to quarantine, Bayes learning or AI training.</p></section>
@@ -5826,7 +5852,7 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <section class="help-card"><h3>Session Security</h3><p>Sessions use an idle timeout plus an absolute lifetime. Login throttling, same-site cookies and request-origin protection are enabled by Security Pack 1.</p></section>
     <section class="help-card"><h3>Quarantine Safety</h3><p>The quarantine directory is mounted read-only. The dashboard never deletes, moves, renames, truncates or overwrites quarantine objects. Release uses the host Amavis PDP workflow; analysis uploads are temporary and do not alter quarantine state.</p></section>
     <section class="help-card"><h3>Three-Tier AI Threat Intelligence</h3><p>R1.1.45 adds self-contained Infrastructure AI and Campaign AI evidence alongside Message AI. Infrastructure AI evaluates locally observed Received-header sender host/HELO consistency, source IP, offline ASN, authentication failures, sender/reply/message-ID relationships and local IP/ASN rotation. Campaign AI stores privacy-reduced one-way fingerprints for locally observed quarantine messages and correlates repeated templates, sender-domain rotation, source-IP diversity, multi-ASN behavior and URL-domain-set reuse over a 30-day local window. The Correlation Engine is SHADOW ONLY and has no Postfix, Amavis, release, quarantine or automatic ground-truth authority. Manual uploaded email analysis does not add samples to the production campaign repository.</p></section>
-    <section class="help-card"><h3>Quarantine Intelligence Grid Layout</h3><p>R1.1.46 realigns Quarantine Intelligence into explicit review and evidence rows. AI Shadow Intelligence and Mail Admin Ground Truth stay paired on desktop; GEO-IP and Sender Policy share a balanced support row; Amavis trace and Learning History remain full-width. Infrastructure AI and Campaign AI use aligned nested grids and collapse cleanly on smaller screens without leaving empty columns.</p></section>
+    <section class="help-card"><h3>Quarantine Intelligence Grid Layout</h3><p>R1.1.51 keeps Quarantine Intelligence in explicit aligned review and evidence rows. AI Shadow Intelligence and Mail Admin Ground Truth stay paired on desktop; Current Data and Metrics remain equal-width; Independent Attachment Intelligence occupies the complete AI evidence row without an unused blank column; Infrastructure AI and Campaign AI remain paired and equal-width beneath it. GEO-IP and Sender Policy share a balanced support row, while Amavis trace and Learning History remain full-width. The layout collapses cleanly on smaller screens.</p></section>
     <section class="help-card"><h3>GEO-IP Database</h3><p>GEO-IP enrichment is offline. To enable location and ASN details, install compatible MaxMind GeoLite2/GeoIP2 MMDB files in the configured data/geoip directory. If databases are absent, the dashboard still reports the observed public source IP without contacting an external lookup service.</p></section>
   </div>
 </div>
@@ -7063,11 +7089,13 @@ async function openQuarantineIntelligence(pdpId){
           </div>
         </div>
         <div class="qintel-ai-note">AI never controls Postfix, Amavis, SpamAssassin, release, or quarantine decisions. Explicit Mail Admin HAM/SPAM ground truth supplies AI labels independently of SpamAssassin/Amavis learning. Automatic retraining creates a candidate only; activation remains explicit and affects shadow prediction only.</div>
+        ${aiProposal.attachment_intelligence?.available?`<div class="qintel-ai-metrics qintel-ai-metrics-single" style="margin-top:10px"><div class="qintel-ai-metric"><h4>Independent Attachment Intelligence</h4><div class="qintel-ai-grid"><span>Risk</span><b>${esc(aiProposal.attachment_intelligence.risk||"NORMAL")}</b><span>Nested archive</span><b>${aiProposal.attachment_intelligence.nested_archive?"YES":"NO"}</b><span>Archive depth</span><b>${esc(aiProposal.attachment_intelligence.archive_depth??0)}</b><span>Dangerous members</span><b>${esc(aiProposal.attachment_intelligence.dangerous_member_count??0)}</b><span>Detected</span><b>${esc((aiProposal.attachment_intelligence.dangerous_members||[]).map(x=>x.name).slice(0,8).join(" · ")||"None")}</b></div><div class="qintel-ai-note">Local-only bounded archive inspection. Members are never executed and no Amavis/SpamAssassin verdict is used as an AI feature.</div></div></div>`:""}
         <div class="qintel-ai-metrics" style="margin-top:10px"><div class="qintel-ai-metric"><h4>Infrastructure AI · LOCAL</h4><div class="qintel-ai-grid"><span>Score</span><b>${esc(data.threat_intelligence?.infrastructure?.score??"-")}/100</b><span>Source IP</span><b>${esc(data.threat_intelligence?.infrastructure?.source_ip||"-")}</b><span>Observed PTR/from</span><b>${esc(data.threat_intelligence?.infrastructure?.observed_reverse_name||"-")}</b><span>Observed HELO</span><b>${esc(data.threat_intelligence?.infrastructure?.observed_helo||"-")}</b><span>ASN</span><b>${data.threat_intelligence?.infrastructure?.asn?`AS${esc(data.threat_intelligence.infrastructure.asn)} — ${esc(data.threat_intelligence.infrastructure.asn_organization||"")}`:"-"}</b><span>Signals</span><b>${esc((data.threat_intelligence?.infrastructure?.signals||[]).map(x=>x.code).slice(0,5).join(" · ")||"No elevated signal")}</b></div></div><div class="qintel-ai-metric"><h4>Campaign AI · LOCAL</h4><div class="qintel-ai-grid"><span>Score</span><b>${esc(data.threat_intelligence?.campaign?.score??"-")}/100</b><span>Template seen</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_messages??0)} message(s)</b><span>Sender domains</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_distinct_sender_domains??0)}</b><span>Source IPs</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_distinct_source_ips??0)}</b><span>ASNs</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_distinct_asns??0)}</b><span>Signals</span><b>${esc((data.threat_intelligence?.campaign?.signals||[]).map(x=>x.code).slice(0,5).join(" · ")||"No cluster threshold crossed")}</b></div></div></div>
         <div class="qintel-ai-note" style="margin-top:8px">Three-tier correlation: <b>${esc(data.threat_intelligence?.correlation?.assessment||"Unavailable")}</b> · score <b>${esc(data.threat_intelligence?.correlation?.score??"-")}/100</b> · SHADOW ONLY · authority NONE. Local observations only; no third-party threat feed.</div>
         ${canTrainAI?`<div class="qintel-ai-actions"><button type="button" onclick="aiBackfillLabels()">Sync Existing Labels</button><button type="button" onclick="aiTrainCandidate()">Train Candidate</button><button id="aiLivePromoteButton" type="button" onclick="aiPromoteCandidate()" ${aiCandidate==="None"?"disabled":""}>Activate Candidate Model</button></div>`:""}
         </section>
         ${canTrainAI?`<section class="qintel-card qintel-ground-truth"><h4>Mail Admin Ground Truth <span class="geo-badge">AI ONLY</span></h4>
+          <div id="aiGtSavedState" class="qintel-ai-note" style="margin-bottom:10px"></div>
           <div class="qintel-gt-top">
             <div class="qintel-proposal-box"><div class="qintel-section-label">AI Proposal (Pre-filled)</div><div class="qintel-kv"><span>AI proposed decision</span><b id="aiGtProposalLabel">${esc(proposedLabel||"NO PROPOSAL")}${aiProposal.available?` · ${esc(aiProposal.confidence??"-")}%`:""}</b>
             <span>AI proposed classification</span><b id="aiGtProposalClass">${esc(proposedClass||"-")}</b>
@@ -7114,7 +7142,7 @@ async function openQuarantineIntelligence(pdpId){
           {key:"learned_at",label:"Time"},{key:"learning_type",label:"Class"},{key:"learned_by",label:"User"},{key:"examined_count",label:"Examined"},{key:"learned_count",label:"Learned"}
         ])}</section>
       </div>`;
-    initAiGroundTruthProposal(proposedLabel,proposedClass);
+    initAiGroundTruthProposal(proposedLabel,proposedClass,data.admin_ground_truth||{});
   }catch(error){
     body.innerHTML=`<div class="qintel-card">${esc(error.message||"Unable to load intelligence")}</div>`;
   }
@@ -7204,6 +7232,7 @@ function stopAiTrainerLiveFeed(){
 
 const AI_GT_CLASSES={HAM:["LEGITIMATE_BUSINESS","EXPECTED_TRANSACTIONAL","APPROVED_NEWSLETTER","INTERNAL_OR_TRUSTED","PERSONAL_OR_DIRECT","OTHER_HAM"],SPAM:["UCE_AUTHENTICATED","UCE_UNAUTHENTICATED","PHISHING","CREDENTIAL_PHISHING","SPEAR_PHISHING","WHALING","BEC","INVOICE_FRAUD","ADVANCE_FEE_INVESTMENT","INHERITANCE_419","LOTTERY_PRIZE","FAKE_JOB","CHARITY_FRAUD","TECH_SUPPORT","CALLBACK_PHISHING","FAKE_ECOMMERCE","SEO_DIRECTORY","BOTNET","BPH","SNOWSHOE","MALWARE","OTHER_SPAM"]};
 let currentAiGtProposal={label:"",classification:""};
+let currentAiGtSaved={};
 function updateAiGtClasses(preferred=""){
   const label=document.getElementById("aiGtLabel"), cls=document.getElementById("aiGtClass");
   if(!label||!cls)return;
@@ -7213,11 +7242,23 @@ function updateAiGtClasses(preferred=""){
   if(values.includes(previous))cls.value=previous;
   updateAiGtActionState();
 }
-function initAiGroundTruthProposal(label,classification){
+function initAiGroundTruthProposal(label,classification,saved={}){
   currentAiGtProposal={label:String(label||"").toUpperCase(),classification:String(classification||"").toUpperCase()};
+  currentAiGtSaved=saved||{};
+  const savedLabel=String(currentAiGtSaved.label||"").toUpperCase();
+  const savedClass=String(currentAiGtSaved.classification||"").toUpperCase();
   const labelEl=document.getElementById("aiGtLabel");
-  if(labelEl&&["HAM","SPAM"].includes(currentAiGtProposal.label))labelEl.value=currentAiGtProposal.label;
-  updateAiGtClasses(currentAiGtProposal.classification);
+  const effectiveLabel=["HAM","SPAM"].includes(savedLabel)?savedLabel:currentAiGtProposal.label;
+  const effectiveClass=savedLabel?savedClass:currentAiGtProposal.classification;
+  if(labelEl&&["HAM","SPAM"].includes(effectiveLabel))labelEl.value=effectiveLabel;
+  updateAiGtClasses(effectiveClass);
+  const reason=document.getElementById("aiGtReason"),notes=document.getElementById("aiGtNotes");
+  if(reason) reason.value=String(currentAiGtSaved.review_reason||"");
+  if(notes) notes.value=String(currentAiGtSaved.admin_notes||"");
+  const state=document.getElementById("aiGtSavedState");
+  if(state){
+    state.innerHTML=savedLabel?`<b>Saved Admin Ground Truth:</b> ${esc(savedLabel)} / ${esc(savedClass||"-")} · ${esc(currentAiGtSaved.reviewer||"-")} · ${esc(currentAiGtSaved.created_at||currentAiGtSaved.updated_at||"")}`:`<b>Saved Admin Ground Truth:</b> None yet. AI proposal is pre-filled for review.`;
+  }
 }
 function updateAiGtActionState(){
   const label=document.getElementById("aiGtLabel")?.value||"";
@@ -7228,9 +7269,9 @@ function updateAiGtActionState(){
   if(save)save.disabled=same;
 }
 function resetAiGroundTruth(){
-  initAiGroundTruthProposal(currentAiGtProposal.label,currentAiGtProposal.classification);
-  const reason=document.getElementById("aiGtReason"),notes=document.getElementById("aiGtNotes");
-  if(reason)reason.value=""; if(notes)notes.value=""; updateAiGtActionState();
+  // Reset unsaved edits to the persisted administrator state (or AI proposal if no saved state exists).
+  initAiGroundTruthProposal(currentAiGtProposal.label,currentAiGtProposal.classification,currentAiGtSaved);
+  updateAiGtActionState();
 }
 async function submitAiGroundTruth(mode="auto"){
   const label=document.getElementById("aiGtLabel")?.value||"";
@@ -7250,6 +7291,10 @@ async function submitAiGroundTruth(mode="auto"){
     if(data.reversal?.reversed)msg+=` Previous ${data.reversal.previous_label} label is retained as SUPERSEDED audit history.`;
     if(data.conflict_investigation_id)msg+=` AI conflict reverse engineering stored as investigation #${data.conflict_investigation_id}.`;
     if(data.calibration_id)msg+=` Calibration record #${data.calibration_id} stored.`;
+    // Use the row read back from MariaDB, not a browser-only reconstruction.
+    currentAiGtSaved=data.admin_ground_truth||{label,classification,review_reason,admin_notes,reviewer:data.reviewer||"current admin",created_at:new Date().toLocaleString(undefined,{hour12:false})};
+    const state=document.getElementById("aiGtSavedState");
+    if(state)state.innerHTML=`<b>Saved Admin Ground Truth:</b> ${esc(currentAiGtSaved.label||label)} / ${esc(currentAiGtSaved.classification||classification||"-")} · persisted in MariaDB`;
     alert(msg); await refreshAiTrainerLiveStatus();
   }catch(error){alert(error.message||"Ground-truth save failed");}
 }

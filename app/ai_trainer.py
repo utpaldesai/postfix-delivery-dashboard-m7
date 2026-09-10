@@ -15,12 +15,14 @@ import gzip
 import hashlib
 import html
 import ipaddress
+import io
 import json
 import math
 import os
 import re
 import threading
 import time
+import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from email import policy
@@ -68,9 +70,78 @@ _lock = threading.RLock()
 _auto_train_running = False
 _status_cache = {"ts": 0.0, "signature": None, "value": None}
 STATUS_CACHE_SECONDS = max(1.0, float(os.getenv("AI_TRAINER_STATUS_CACHE_SECONDS", "8")))
+ATTACHMENT_SCAN_MAX_DEPTH = max(1, min(8, int(os.getenv("AI_ATTACHMENT_SCAN_MAX_DEPTH", "5"))))
+ATTACHMENT_SCAN_MAX_MEMBERS = max(10, min(2000, int(os.getenv("AI_ATTACHMENT_SCAN_MAX_MEMBERS", "250"))))
+ATTACHMENT_SCAN_MAX_MEMBER_BYTES = max(65536, int(os.getenv("AI_ATTACHMENT_SCAN_MAX_MEMBER_BYTES", "8388608")))
+ATTACHMENT_SCAN_MAX_TOTAL_BYTES = max(1048576, int(os.getenv("AI_ATTACHMENT_SCAN_MAX_TOTAL_BYTES", "33554432")))
+_DANGEROUS_ARCHIVE_EXT = {".bat", ".cmd", ".com", ".cpl", ".dll", ".exe", ".hta", ".jar", ".js", ".jse", ".lnk", ".msi", ".msp", ".ps1", ".reg", ".scr", ".vbe", ".vbs", ".wsf", ".wsh"}
 
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9_+.-]{1,48}", re.I)
 
+
+def _scan_zip_bytes(payload: bytes, *, archive_name: str = "archive.zip", depth: int = 1, budget: dict | None = None) -> dict:
+    """Bounded, local-only ZIP member inspection. Never executes or writes members to disk."""
+    budget = budget or {"members": 0, "bytes": 0}
+    result = {"archive_name": archive_name, "max_depth": depth, "members": [], "dangerous_members": [], "nested_archives": 0, "truncated": False, "errors": []}
+    if depth > ATTACHMENT_SCAN_MAX_DEPTH:
+        result["truncated"] = True
+        return result
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                if budget["members"] >= ATTACHMENT_SCAN_MAX_MEMBERS:
+                    result["truncated"] = True
+                    break
+                budget["members"] += 1
+                name = str(info.filename or "unnamed")[:512]
+                ext = Path(name).suffix.lower()
+                entry = {"name": name, "extension": ext, "depth": depth, "size": int(info.file_size or 0), "compressed_size": int(info.compress_size or 0), "dangerous": ext in _DANGEROUS_ARCHIVE_EXT, "archive": ext in _ARCHIVE_EXT}
+                result["members"].append(entry)
+                if entry["dangerous"]:
+                    result["dangerous_members"].append(entry)
+                if entry["archive"] and ext == ".zip" and depth < ATTACHMENT_SCAN_MAX_DEPTH:
+                    if info.file_size > ATTACHMENT_SCAN_MAX_MEMBER_BYTES or budget["bytes"] + info.file_size > ATTACHMENT_SCAN_MAX_TOTAL_BYTES:
+                        result["truncated"] = True
+                        continue
+                    try:
+                        nested = zf.read(info)
+                        budget["bytes"] += len(nested)
+                        child = _scan_zip_bytes(nested, archive_name=name, depth=depth + 1, budget=budget)
+                        result["nested_archives"] += 1 + int(child.get("nested_archives") or 0)
+                        result["max_depth"] = max(result["max_depth"], int(child.get("max_depth") or depth))
+                        result["members"].extend(child.get("members") or [])
+                        result["dangerous_members"].extend(child.get("dangerous_members") or [])
+                        result["truncated"] = result["truncated"] or bool(child.get("truncated"))
+                    except Exception as exc:
+                        result["errors"].append(str(exc)[:160])
+    except Exception as exc:
+        result["errors"].append(str(exc)[:160])
+    return result
+
+
+def attachment_intelligence(source_path: Path) -> dict:
+    """Independent attachment evidence for operator display and model features."""
+    try:
+        msg = BytesParser(policy=policy.default).parsebytes(source_path.read_bytes())
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)[:200], "local_only": True}
+    evidence=[]; dangerous=[]; max_depth=0; nested=0; truncated=False
+    for part in msg.walk():
+        name=str(part.get_filename() or "").strip()
+        if not name: continue
+        ext=Path(name).suffix.lower(); payload=part.get_payload(decode=True) or b""
+        item={"name":name,"extension":ext,"content_type":str(part.get_content_type() or ""),"size":len(payload),"archive":ext in _ARCHIVE_EXT,"dangerous":ext in _DANGEROUS_ARCHIVE_EXT,"depth":0}
+        evidence.append(item)
+        if item["dangerous"]: dangerous.append(item)
+        if ext==".zip" and payload:
+            scan=_scan_zip_bytes(payload, archive_name=name)
+            evidence.extend(scan.get("members") or [])
+            dangerous.extend(scan.get("dangerous_members") or [])
+            max_depth=max(max_depth,int(scan.get("max_depth") or 0)); nested += int(scan.get("nested_archives") or 0); truncated=truncated or bool(scan.get("truncated"))
+    risk="CRITICAL" if dangerous and max_depth>=2 else ("HIGH" if dangerous else ("ELEVATED" if nested else "NORMAL"))
+    return {"available":True,"local_only":True,"network_lookup":False,"execution":False,"risk":risk,"nested_archive":bool(nested),"archive_depth":max_depth,"dangerous_member_count":len(dangerous),"dangerous_members":dangerous[:30],"evidence":evidence[:120],"truncated":truncated}
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -423,6 +494,23 @@ def _extract_features_and_meta(path: Path, item: dict | None = None):
                 size = len(payload)
                 bucket = min(12, int(math.log2(max(1, size))) // 2)
                 features[_hash_token("attach:size_bucket:" + str(bucket))] += 1
+                if suffix == ".zip" and payload:
+                    archive_scan = _scan_zip_bytes(payload, archive_name=str(name or "archive.zip"))
+                    depth = int(archive_scan.get("max_depth") or 0)
+                    dangerous = archive_scan.get("dangerous_members") or []
+                    nested_count = int(archive_scan.get("nested_archives") or 0)
+                    if nested_count:
+                        features[_hash_token("attach:nested_archive")] += min(nested_count, 5)
+                    if depth:
+                        features[_hash_token("attach:archive_depth:" + str(min(depth, ATTACHMENT_SCAN_MAX_DEPTH)))] += 1
+                    for member in dangerous[:20]:
+                        ext = str(member.get("extension") or "")[:16]
+                        features[_hash_token("attach:embedded_dangerous")] += 1
+                        if ext:
+                            features[_hash_token("attach:embedded_ext:" + ext)] += 1
+                    if dangerous:
+                        features[_hash_token("attach:embedded_executable_or_script")] += 1
+                        meta["hard_ham_score"] += 2
     if attachments:
         features[_hash_token("attachments:count:" + str(min(attachments, 10)))] += 1
     if max_depth > 1:
@@ -587,7 +675,24 @@ def _default_root_cause(forensic: dict, ai_prediction: str, admin_label: str):
         return "Possible legitimate message penalized by sender/header anomaly features; review Hard-HAM handling."
     return "AI/human conflict requires administrator root-cause review; no automatic model change applied."
 
-def record_human_label(pdp_id: str, label: str, source_path: Path, item: dict | None, username: str = "", source: str = "admin-ground-truth", classification: str = "", review_reason: str = ""):
+def _persist_admin_ground_truth_db(**kwargs):
+    """Persist authoritative ground truth; real DB errors are fatal.
+
+    Source-only regression tests intentionally import ai_trainer without
+    installing runtime dependencies.  Missing PyMySQL is tolerated only in
+    that isolated verifier context; the production application imports app.db
+    at startup and cannot run without the driver.
+    """
+    try:
+        from .db import record_ai_ground_truth_history
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "pymysql":
+            _event("GROUND_TRUTH_DB_SKIPPED_NO_DRIVER", error="pymysql unavailable in source-only verifier")
+            return None
+        raise
+    return record_ai_ground_truth_history(**kwargs)
+
+def record_human_label(pdp_id: str, label: str, source_path: Path, item: dict | None, username: str = "", source: str = "admin-ground-truth", classification: str = "", review_reason: str = "", admin_notes: str = ""):
     """Capture explicit admin ground truth for the current independent AI generation."""
     if not AI_ENABLED:
         return {"ok": False, "disabled": True}
@@ -610,7 +715,24 @@ def record_human_label(pdp_id: str, label: str, source_path: Path, item: dict | 
             previous_row = row
             previous_label = str(row.get("label") or "").upper()
             if previous_label == label and str(row.get("classification") or "") == classification:
-                return {"ok": True, "duplicate": True, "sample_id": row.get("sample_id")}
+                # A duplicate training sample is still an explicit administrator save.
+                # Persist/refresh the authoritative MariaDB CURRENT state even when
+                # the immutable training dataset already contains this label.  This
+                # also repairs messages calibrated by R1.1.49 while its DB-history
+                # INSERT was defective.
+                history=_persist_admin_ground_truth_db(
+                    source_sha256=sha, pdp_id=pdp_id, label=label, classification=classification,
+                    review_reason=review_reason, admin_notes=admin_notes, reviewer=username, label_source=source,
+                    generation_id=CURRENT_GENERATION, feature_schema=CURRENT_FEATURE_SCHEMA,
+                )
+                if history is None:
+                    history={"previous_label": previous_label, "reversal_count": 0, "reversed": False}
+                return {
+                    "ok": True, "duplicate": True, "sample_id": row.get("sample_id"),
+                    "source_sha256": sha, "classification": classification,
+                    "reversal": history, "conflict_investigation_id": None,
+                    "auto_train_scheduled": False,
+                }
             break
         if previous_label and previous_label != label and not str(review_reason or "").strip():
             raise ValueError("A review/reversal reason is required when changing an existing HAM/SPAM ground-truth decision")
@@ -656,16 +778,17 @@ def record_human_label(pdp_id: str, label: str, source_path: Path, item: dict | 
         except Exception as exc:
             _event("AI_STATUS_SNAPSHOT_SYNC_FAILED", sample_id=sample_id, error=str(exc)[:300])
         _invalidate_status_cache()
-        history={"previous_label": previous_label, "reversal_count": 0, "reversed": bool(previous_label and previous_label != label)}
-        try:
-            from .db import record_ai_ground_truth_history
-            history=record_ai_ground_truth_history(
-                source_sha256=sha, pdp_id=pdp_id, label=label, classification=classification,
-                review_reason=review_reason, reviewer=username, label_source=source,
-                generation_id=CURRENT_GENERATION, feature_schema=CURRENT_FEATURE_SCHEMA,
-            )
-        except Exception as exc:
-            _event("GROUND_TRUTH_DB_HISTORY_FAILED", sample_id=sample_id, error=str(exc)[:300])
+        # MariaDB is authoritative for the Admin Decision state.  Do not silently
+        # downgrade a DB persistence failure to a successful calibration response.
+        # If this raises, the API returns an explicit failure and the administrator
+        # can retry; the duplicate path above safely repairs the DB state on retry.
+        history=_persist_admin_ground_truth_db(
+            source_sha256=sha, pdp_id=pdp_id, label=label, classification=classification,
+            review_reason=review_reason, admin_notes=admin_notes, reviewer=username, label_source=source,
+            generation_id=CURRENT_GENERATION, feature_schema=CURRENT_FEATURE_SCHEMA,
+        )
+        if history is None:
+            history={"previous_label": previous_label, "reversal_count": 0, "reversed": bool(previous_label and previous_label != label)}
         conflict_id=None
         candidate=_load_model(CANDIDATE_MODEL)
         if _model_is_current_generation(candidate):
@@ -1100,7 +1223,7 @@ def predict_file(source_path: Path, item: dict | None = None):
         }
     features = extract_features(source_path, None)
     result = _predict_model(model, features)
-    return {"enabled": True, "shadow_only": True, "available": True, "model_version": model.get("version"), "algorithm": model.get("algorithm"), **result}
+    return {"enabled": True, "shadow_only": True, "available": True, "model_version": model.get("version"), "algorithm": model.get("algorithm"), "attachment_intelligence": attachment_intelligence(source_path), **result}
 
 
 def predict_shadow_candidate_file(source_path: Path, item: dict | None = None):
@@ -1128,7 +1251,7 @@ def predict_shadow_candidate_file(source_path: Path, item: dict | None = None):
         "model_version": model.get("version"), "algorithm": model.get("algorithm"),
         "feature_schema": model.get("feature_schema", CURRENT_FEATURE_SCHEMA),
         "generation_id": model.get("generation_id", CURRENT_GENERATION),
-        "authentication_policy": model.get("authentication_policy", CURRENT_AUTH_POLICY), **result,
+        "authentication_policy": model.get("authentication_policy", CURRENT_AUTH_POLICY), "attachment_intelligence": attachment_intelligence(source_path), **result,
     }
 
 

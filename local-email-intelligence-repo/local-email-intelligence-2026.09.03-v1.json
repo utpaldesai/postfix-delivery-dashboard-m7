@@ -1,0 +1,420 @@
+{
+  "version": "local-email-intel-2026.09.03-v1",
+  "description": "Self-contained local harmful-email intelligence seed. No third-party corpus, feed, API, URL reputation service, or external repository is required. It provides only locally authored taxonomy and generic defensive pattern families; production learning authority remains Mail Admin Ground Truth.",
+  "source_policy": "LOCAL_ONLY_NO_THIRD_PARTY_NO_NETWORK_DEPENDENCY",
+  "taxonomies": [
+    [
+      "PHISHING",
+      "Phishing",
+      "Generic deceptive credential/identity lure",
+      "HIGH"
+    ],
+    [
+      "CREDENTIAL_PHISHING",
+      "Credential Phishing",
+      "Account/password/session credential lure",
+      "CRITICAL"
+    ],
+    [
+      "SPEAR_PHISHING",
+      "Spear Phishing",
+      "Targeted social engineering",
+      "HIGH"
+    ],
+    [
+      "BEC",
+      "Business Email Compromise",
+      "Executive/vendor/payment impersonation",
+      "CRITICAL"
+    ],
+    [
+      "INVOICE_FRAUD",
+      "Invoice / Payment Fraud",
+      "Invoice, remittance or bank-change diversion",
+      "CRITICAL"
+    ],
+    [
+      "CALLBACK_PHISHING",
+      "Callback Phishing",
+      "Telephone callback lure",
+      "HIGH"
+    ],
+    [
+      "MALWARE",
+      "Malware Delivery",
+      "Attachment/archive/payload delivery",
+      "CRITICAL"
+    ],
+    [
+      "UCE",
+      "Unsolicited Commercial Email",
+      "Unwanted commercial solicitation",
+      "MEDIUM"
+    ],
+    [
+      "SEO_DIRECTORY",
+      "SEO / Directory Spam",
+      "Unsolicited ranking/listing solicitation",
+      "MEDIUM"
+    ],
+    [
+      "ADVANCE_FEE_INVESTMENT",
+      "Advance Fee / Investment",
+      "Funding, investment or transfer-fee lure",
+      "HIGH"
+    ],
+    [
+      "INHERITANCE_419",
+      "Inheritance / 419",
+      "Beneficiary/dormant-fund fraud",
+      "HIGH"
+    ],
+    [
+      "LOTTERY_PRIZE",
+      "Lottery / Prize",
+      "Unexpected award/prize claim",
+      "HIGH"
+    ],
+    [
+      "FAKE_JOB",
+      "Fake Job",
+      "Remote work/equipment/task fraud",
+      "HIGH"
+    ],
+    [
+      "TECH_SUPPORT",
+      "Tech Support / Renewal",
+      "Fake renewal/refund/support lure",
+      "HIGH"
+    ],
+    [
+      "FAKE_ECOMMERCE",
+      "Fake E-commerce",
+      "Deceptive purchase/deal solicitation",
+      "HIGH"
+    ]
+  ],
+  "patterns": [
+    {
+      "taxonomy": "CREDENTIAL_PHISHING",
+      "key": "credential_account_action",
+      "title": "Credential/account action lure",
+      "weight": 5.5,
+      "classification": "CREDENTIAL_PHISHING",
+      "phrases": [
+        "verify your account",
+        "confirm your account",
+        "password expires",
+        "unusual sign-in",
+        "account suspended",
+        "validate your mailbox",
+        "sign in to continue",
+        "login to verify"
+      ],
+      "min_hits": 1,
+      "explanation": "Credential harvesting language used in credential-harvesting lures."
+    },
+    {
+      "taxonomy": "PHISHING",
+      "key": "security_urgency",
+      "title": "Security urgency / fear lure",
+      "weight": 4.0,
+      "classification": "PHISHING",
+      "phrases": [
+        "security alert",
+        "immediate action required",
+        "unauthorized activity",
+        "suspicious activity",
+        "verify immediately",
+        "account will be closed"
+      ],
+      "min_hits": 1,
+      "explanation": "Fear and urgency are common deceptive persuasion mechanisms."
+    },
+    {
+      "taxonomy": "BEC",
+      "key": "payment_redirect",
+      "title": "Payment redirection / banking change",
+      "weight": 6.0,
+      "classification": "BEC",
+      "phrases": [
+        "new bank details",
+        "updated banking details",
+        "change of bank details",
+        "new account details",
+        "redirect payment",
+        "payment to the new account"
+      ],
+      "min_hits": 1,
+      "explanation": "High-risk payment diversion language."
+    },
+    {
+      "taxonomy": "BEC",
+      "key": "executive_secrecy",
+      "title": "Executive urgency and secrecy",
+      "weight": 4.8,
+      "classification": "BEC",
+      "phrases": [
+        "urgent transfer",
+        "process this payment",
+        "keep this confidential",
+        "confidential transaction",
+        "need this done today",
+        "do not discuss",
+        "are you available"
+      ],
+      "min_hits": 2,
+      "explanation": "Targeted executive/vendor impersonation pattern."
+    },
+    {
+      "taxonomy": "INVOICE_FRAUD",
+      "key": "invoice_remittance",
+      "title": "Invoice/remittance lure",
+      "weight": 5.2,
+      "classification": "INVOICE_FRAUD",
+      "phrases": [
+        "attached invoice",
+        "invoice attached",
+        "outstanding invoice",
+        "overdue invoice",
+        "remittance advice",
+        "payment details",
+        "bank details"
+      ],
+      "min_hits": 2,
+      "explanation": "Invoice and remittance language requiring independent verification."
+    },
+    {
+      "taxonomy": "CALLBACK_PHISHING",
+      "key": "callback_lure",
+      "title": "Telephone callback lure",
+      "weight": 4.5,
+      "classification": "CALLBACK_PHISHING",
+      "phrases": [
+        "call this number",
+        "call us immediately",
+        "call us now",
+        "contact support at",
+        "speak with an agent",
+        "call the number below"
+      ],
+      "min_hits": 1,
+      "explanation": "Moves victim to voice channel."
+    },
+    {
+      "taxonomy": "TECH_SUPPORT",
+      "key": "renewal_refund",
+      "title": "Renewal/refund support scam",
+      "weight": 5.0,
+      "classification": "TECH_SUPPORT",
+      "phrases": [
+        "subscription renewed",
+        "auto renewed",
+        "renewal charge",
+        "refund department",
+        "charged your account",
+        "antivirus renewal"
+      ],
+      "min_hits": 2,
+      "explanation": "Subscription/refund lure frequently paired with callback."
+    },
+    {
+      "taxonomy": "ADVANCE_FEE_INVESTMENT",
+      "key": "investment_funding",
+      "title": "Investment/funding solicitation",
+      "weight": 4.0,
+      "classification": "ADVANCE_FEE_INVESTMENT",
+      "phrases": [
+        "investment opportunity",
+        "joint venture",
+        "structured financing",
+        "project financing",
+        "financial partnership",
+        "private investor",
+        "funding opportunity"
+      ],
+      "min_hits": 2,
+      "explanation": "Unsolicited high-value funding proposition."
+    },
+    {
+      "taxonomy": "INHERITANCE_419",
+      "key": "beneficiary_fund",
+      "title": "Inheritance/beneficiary lure",
+      "weight": 5.2,
+      "classification": "INHERITANCE_419",
+      "phrases": [
+        "next of kin",
+        "unclaimed inheritance",
+        "inheritance fund",
+        "dormant account",
+        "deceased client",
+        "beneficiary"
+      ],
+      "min_hits": 2,
+      "explanation": "Classic beneficiary/dormant-fund social engineering."
+    },
+    {
+      "taxonomy": "INHERITANCE_419",
+      "key": "advance_fee",
+      "title": "Advance fee request",
+      "weight": 5.5,
+      "classification": "INHERITANCE_419",
+      "phrases": [
+        "processing fee",
+        "transfer fee",
+        "release fee",
+        "clearance fee",
+        "administrative fee",
+        "upfront fee"
+      ],
+      "min_hits": 1,
+      "explanation": "Up-front charge before promised funds are released."
+    },
+    {
+      "taxonomy": "LOTTERY_PRIZE",
+      "key": "unexpected_prize",
+      "title": "Unexpected lottery/prize claim",
+      "weight": 5.0,
+      "classification": "LOTTERY_PRIZE",
+      "phrases": [
+        "you have won",
+        "winning notification",
+        "lottery winner",
+        "claim your prize",
+        "prize award",
+        "sweepstakes winner"
+      ],
+      "min_hits": 1,
+      "explanation": "Unexpected award/prize lure."
+    },
+    {
+      "taxonomy": "FAKE_JOB",
+      "key": "remote_job_payment",
+      "title": "Fake remote job/equipment lure",
+      "weight": 5.0,
+      "classification": "FAKE_JOB",
+      "phrases": [
+        "work from home",
+        "home based job",
+        "equipment purchase",
+        "check for equipment",
+        "training materials",
+        "remote position",
+        "easy task"
+      ],
+      "min_hits": 2,
+      "explanation": "Remote employment/task-fraud pattern."
+    },
+    {
+      "taxonomy": "UCE",
+      "key": "unsolicited_pitch",
+      "title": "Generic unsolicited commercial pitch",
+      "weight": 2.7,
+      "classification": "UCE_UNAUTHENTICATED",
+      "phrases": [
+        "we offer",
+        "our services",
+        "marketing services",
+        "business opportunity",
+        "special offer",
+        "potential collaboration",
+        "i am reaching out"
+      ],
+      "min_hits": 2,
+      "explanation": "UCE language; authentication is not treated as legitimacy evidence."
+    },
+    {
+      "taxonomy": "SEO_DIRECTORY",
+      "key": "seo_pitch",
+      "title": "SEO/directory solicitation",
+      "weight": 3.5,
+      "classification": "SEO_DIRECTORY",
+      "phrases": [
+        "seo services",
+        "search engine optimization",
+        "google ranking",
+        "first page of google",
+        "business directory",
+        "directory listing",
+        "increase website traffic",
+        "backlinks"
+      ],
+      "min_hits": 2,
+      "explanation": "Common unsolicited SEO/directory pitch."
+    },
+    {
+      "taxonomy": "FAKE_ECOMMERCE",
+      "key": "discount_lure",
+      "title": "High-discount e-commerce lure",
+      "weight": 3.5,
+      "classification": "FAKE_ECOMMERCE",
+      "phrases": [
+        "limited time offer",
+        "huge discount",
+        "clearance sale",
+        "exclusive deal",
+        "90% off",
+        "free shipping today"
+      ],
+      "min_hits": 2,
+      "explanation": "Aggressive deal language requiring URL/vendor verification."
+    },
+    {
+      "taxonomy": "PHISHING",
+      "key": "reply_to_divergence",
+      "title": "Phishing lure plus Reply-To divergence",
+      "weight": 5.0,
+      "classification": "PHISHING",
+      "phrases": [
+        "verify",
+        "account",
+        "payment",
+        "invoice",
+        "security"
+      ],
+      "min_hits": 1,
+      "explanation": "Social-engineering language combined with identity divergence.",
+      "structural_any": [
+        "reply_to_domain_mismatch"
+      ]
+    },
+    {
+      "taxonomy": "BEC",
+      "key": "messageid_divergence",
+      "title": "Business lure plus Message-ID domain divergence",
+      "weight": 4.5,
+      "classification": "BEC",
+      "phrases": [
+        "payment",
+        "invoice",
+        "bank",
+        "urgent",
+        "transfer"
+      ],
+      "min_hits": 1,
+      "explanation": "Business/payment language combined with sender/Message-ID domain divergence.",
+      "structural_any": [
+        "message_id_domain_mismatch"
+      ]
+    }
+  ],
+  "counter_evidence": [
+    {
+      "key": "expected_business_context",
+      "title": "Expected business context",
+      "weight": -2.5,
+      "description": "Administrator-confirmed expected sender/context is counter-evidence only and is never inferred from authentication."
+    },
+    {
+      "key": "authenticated_not_legitimate",
+      "title": "Authentication is identity evidence only",
+      "weight": 0,
+      "description": "SPF/DKIM/DMARC pass must not convert unsolicited content into HAM."
+    }
+  ],
+  "regression_cases": [],
+  "external_sources": [],
+  "training_authority": false,
+  "network_dependency": false,
+  "raw_external_samples_bundled": false
+}
