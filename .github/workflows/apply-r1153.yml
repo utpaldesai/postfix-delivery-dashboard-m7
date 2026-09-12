@@ -32,12 +32,17 @@ jobs:
           python tests/test-r1-1-51-quarantine-layout-alignment.py
           python tests/test-m7-ai-integration.py
           python stale-reference-audit.py
-          python audit-build.py
 
       - name: Remove one-shot staging helpers
         run: |
+          rm -rf tools/r1153-patch
           rm -f tools/apply-r1153.py
           rm -f .github/workflows/apply-r1153.yml
+
+      - name: Regenerate source checksums
+        run: |
+          find . -type f ! -path './.git/*' ! -name CHECKSUMS.sha256 -print0 | sort -z | xargs -0 sha256sum > CHECKSUMS.sha256
+          python audit-build.py
 
       - name: Commit R1.1.53 source
         run: |
