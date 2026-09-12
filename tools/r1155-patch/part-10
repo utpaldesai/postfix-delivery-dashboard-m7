@@ -1,0 +1,47 @@
+e
++        row = dict(item)
++        row["admin_decision_required"] = not has_admin_decision
++        row["admin_decision_status"] = "REQUIRED" if not has_admin_decision else "COMPLETED"
++        filtered.append(row)
+ 
+     top_domains = Counter(
+         item["from_domain"] for item in filtered if item["from_domain"]
+     ).most_common(10)
++
++    # Review Queue counters intentionally reflect all currently cached quarantine
++    # items, independent of the Admin Decision filter currently selected.
++    review_required = sum(1 for item in source if str(item.get("pdp_id") or "") not in decided_pdp_ids)
++    review_completed = max(0, len(source) - review_required)
+ 
+     total_items = len(filtered)
+     effective_page_size = ITEMS_PER_PAGE if page_size in (None, "") else max(10, min(200, int(page_size)))
+@@ -882,6 +899,12 @@
+             "virus": counts.get("Virus", 0),
+             "banned": counts.get("Banned", 0),
+         },
++        "review_queue": {
++            "required": review_required,
++            "completed": review_completed,
++            "total": len(source),
++            "filter": admin_decision,
++        },
+     }
+ 
+ 
+--- a/tests/test-r1-1-54-admin-review-queue.py
++++ b/tests/test-r1-1-54-admin-review-queue.py
+@@ -0,0 +1,24 @@
++from pathlib import Path
++
++root = Path(__file__).resolve().parents[1]
++main = (root / 'app' / 'main.py').read_text(encoding='utf-8')
++quarantine = (root / 'app' / 'quarantine.py').read_text(encoding='utf-8')
++db = (root / 'app' / 'db.py').read_text(encoding='utf-8')
++help_text = main
++
++assert 'admin_decision: str = "all"' in main
++assert 'ai_ground_truth_current_pdp_ids()' in main
++assert 'admin_decision=admin_decision' in main
++assert 'id="qAdminDecision"' in main
++assert 'Review Pending Messages' in main
++assert 'Admin Decision 
