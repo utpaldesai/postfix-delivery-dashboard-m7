@@ -1,0 +1,17 @@
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+-# Postfix Delivery Dashboard — R1.1.53 Semantic Impersonation + Action-Intent Intelligence
++# Postfix Delivery Dashboard — R1.1.55 Admin Review Queue De-duplication + Semantic Intelligence
+ 
+ - Candidate fitting and auto-train counts now accept only CURRENT schema-v4 administrator Ground Truth (`admin-ground-truth`, `admin-ground-truth-ui`, `admin-ai-acknowledged`).
+ - Historical `sa-learn`, Bayes backfill, learning-correction, missing-source and legacy-generation rows are preserved for audit but excluded from AI training eligibility. No existing MariaDB or immutable trainer history is deleted or rewritten.
+@@ -981,3 +981,11 @@
+ ## R1.1.53 — Semantic Impersonation & Action-Intent Intelligence
+ 
+ R1.1.53 keeps schema v4, the seven independent feature families, Hard-HAM weight 1.75, SHADOW ONLY operation, and the R1.1.52 clean-training-provenance boundary. Message AI adds relationship-derived features for recipient-domain mail-service impersonation, delivery/release lures, credential-action language, and action URLs external to both sender and recipient domains. A high-confidence semantic overlay requires multiple independent relationships and can only raise a shadow SPAM/CREDENTIAL_PHISHING proposal; it never changes Postfix/Amavis/SpamAssassin behavior and never creates Ground Truth. The underlying learned-model verdict/confidence is preserved alongside the overlay for calibration and audit.
++
++## R1.1.55 Admin Review Queue De-duplication
++- Keeps the Quarantine Admin Decision filter: All / Required / Completed.
++- Required is derived only from missing CURRENT authoritative Admin Ground Truth; historical/non-authoritative rows do not clear the queue.
++- Keeps the Review Pending Messages hyperlink as the single queue
