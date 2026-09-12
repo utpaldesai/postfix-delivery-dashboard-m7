@@ -25,6 +25,8 @@ jobs:
         run: find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
       - name: Validate R1.1.53
+        env:
+          PYTHONPATH: .
         run: |
           python tests/test-r1-1-53-semantic-impersonation-intent.py
           python tests/test-r1-1-52-training-provenance-provider-hop.py
