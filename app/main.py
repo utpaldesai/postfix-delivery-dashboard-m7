@@ -71,6 +71,7 @@ from .db import (
     ai_ti_status,
     record_ai_ground_truth_calibration,
     ai_ground_truth_current,
+    ai_ground_truth_current_pdp_ids,
     get_postfix_ingest_state,
     set_postfix_ingest_state,
     store_postfix_raw_events_batch,
@@ -1479,6 +1480,7 @@ def quarantine_list(
     q_operator: str = "contains",
     date: str = "",
     category: str = "all",
+    admin_decision: str = "all",
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=10, le=200),
 ):
@@ -1487,13 +1489,19 @@ def quarantine_list(
         raise HTTPException(status_code=400, detail="Invalid quarantine search field")
     if q_operator.strip().lower() not in TEXT_FILTER_OPERATORS:
         raise HTTPException(status_code=400, detail="Invalid text filter operator")
+    admin_decision = str(admin_decision or "all").strip().lower()
+    if admin_decision not in {"all", "required", "completed"}:
+        raise HTTPException(status_code=400, detail="Invalid Admin Decision filter")
     try:
+        decided_pdp_ids = ai_ground_truth_current_pdp_ids()
         result = quarantine_query_items(
             q=q,
             q_field=q_field.strip().lower(),
             q_operator=q_operator.strip().lower(),
             date=date,
             category=category,
+            admin_decision=admin_decision,
+            decided_pdp_ids=decided_pdp_ids,
             page=page,
             page_size=page_size,
         )
@@ -5205,6 +5213,10 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <div class="metric-icon">✓</div>
     <div><span>Released</span><b id="qReleased">0</b><small>Count only</small></div>
   </div>
+  <div class="qreview-metric" aria-label="Admin Review Queue">
+    <div class="metric-icon">☑</div>
+    <div><span>Admin Review Queue</span><b id="qReviewRequired">0</b><small>Decision Required</small><br><button type="button" class="qreview-link" onclick="openRequiredReviewQueue()">Review Pending Messages</button></div>
+  </div>
   <div class="qmetric updated">
     <div class="metric-icon">◷</div>
     <div>
@@ -5237,6 +5249,7 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <label>Date</label>
     <input id="qDate" type="date" title="Quarantine date">
   </div>
+  <div class="filter-group"><label>Admin Decision</label><select id="qAdminDecision" onchange="setQuarantineAdminDecision(this.value)"><option value="all">All</option><option value="required">Required</option><option value="completed">Completed</option></select></div>
   <button class="secondary-btn" onclick="loadQuarantine(1)">Refresh</button>
   <button class="secondary-btn" type="button" onclick="clearQuarantineFilters()">Clear All</button>
   <select id="qPageSize" class="ux-page-size" title="Rows per page">
@@ -5842,6 +5855,7 @@ Total final recipient records: <b id="summaryTotal">0</b>
 
     <section class="help-card"><h3>R1.1.52 Training Provenance & Provider-Aware Transport</h3><p>Candidate training is restricted to CURRENT schema-v4 administrator Ground Truth sources only. Historical sa-learn, Bayes backfill, learning-correction and legacy-feature rows remain preserved for audit but are excluded from fitting and auto-train counts. Infrastructure AI also interprets Google and Microsoft transport-provider hops as contextual routing evidence rather than automatic spam/ham proof; authentication PASS remains identity evidence only.</p></section>
     <section class="help-card"><h3>R1.1.53 Semantic Impersonation & Action-Intent Intelligence</h3><p>Message AI now derives relationship features that connect sender domain, recipient domain, mail-service claims, delivery/release language and action-link destinations. A single keyword can never force a SPAM proposal. A SHADOW-only semantic overlay is raised only when a multi-signal recipient-mail-service impersonation chain is present, such as an unrelated external sender claiming the recipient domain's mail service and directing the user to an action URL outside both domains. The original learned-model verdict/confidence is retained for audit, schema remains v4 with seven feature families, and only explicit Mail Admin Ground Truth can create a training label.</p></section>
+    <section class="help-card"><h3>R1.1.55 Admin Review Queue De-duplication</h3><p>Quarantine exposes a persistent <b>Admin Decision</b> filter with All / Required / Completed states. <b>Required</b> means the quarantine item has no authoritative CURRENT administrator Ground Truth row. The Review Queue count and <b>Review Pending Messages</b> hyperlink open that filtered queue. To inspect a pending item, use the existing <b>Intelligence</b> button; the duplicate per-row <b>Admin Decision Required / Review Now</b> control has been removed. Opening Intelligence never creates Ground Truth; only an explicit administrator save/acknowledgement does. Historical or superseded rows do not satisfy the requirement.</p></section>
     <section class="help-card"><h3>Quarantine Intelligence Grid Layout</h3><p>R1.1.51 keeps Quarantine Intelligence in explicit aligned review and evidence rows. AI Shadow Intelligence and Mail Admin Ground Truth stay paired on desktop; Current Data and Metrics remain equal-width; Independent Attachment Intelligence occupies the complete AI evidence row without an unused blank column; Infrastructure AI and Campaign AI remain paired and equal-width beneath it. GEO-IP and Sender Policy share a balanced support row, while Amavis trace and Learning History remain full-width. The layout collapses cleanly on smaller screens.</p></section>
     <section class="help-card"><h3>GEO-IP Database</h3><p>GEO-IP enrichment is offline. To enable location and ASN details, install compatible MaxMind GeoLite2/GeoIP2 MMDB files in the configured data/geoip directory. If databases are absent, the dashboard still reports the observed public source IP without contacting an external lookup service.</p></section>
   </div>
@@ -5992,7 +6006,7 @@ function uxSetRefresh(id){const el=document.getElementById(id);if(el)el.textCont
 function uxFilterCount(values){return values.filter(Boolean).length;}
 function uxBadge(id,count){const el=document.getElementById(id);if(!el)return;el.textContent=`${count} filter${count===1?"":"s"} active`;el.classList.toggle("active",count>0);}
 function saveUxFilters(){
-  const ids=["searchField","searchOperator","search","dateFrom","dateTo","filter","deliveryPageSize","qSearchField","qSearchOperator","qSearch","qDate","qPageSize","slSearch","slPreference","slScope","slPageSize","auditSearchOperator","auditSearch","auditDateFrom","auditDateTo","auditAction","auditPageSize"];
+  const ids=["searchField","searchOperator","search","dateFrom","dateTo","filter","deliveryPageSize","qSearchField","qSearchOperator","qSearch","qDate","qAdminDecision","qPageSize","slSearch","slPreference","slScope","slPageSize","auditSearchOperator","auditSearch","auditDateFrom","auditDateTo","auditAction","auditPageSize"];
   const data={};ids.forEach(id=>{const el=document.getElementById(id);if(el)data[id]=el.value;});data.quarantineCategory=quarantineCategory;
   try{localStorage.setItem(UX_FILTER_KEY,JSON.stringify(data));}catch(_){}
 }
@@ -6000,6 +6014,7 @@ function restoreUxFilters(){
   let data={};try{data=JSON.parse(localStorage.getItem(UX_FILTER_KEY)||"{}");}catch(_){}
   Object.entries(data).forEach(([id,value])=>{if(id==="quarantineCategory")return;const el=document.getElementById(id);if(el && [...el.options||[]].some(o=>o.value===String(value)) || (el && !el.options))el.value=value;});
   if(data.quarantineCategory)quarantineCategory=data.quarantineCategory;
+  quarantineAdminDecision=["required","completed"].includes(String(document.getElementById("qAdminDecision")?.value||"").toLowerCase())?String(document.getElementById("qAdminDecision").value).toLowerCase():"all";
   DELIVERY_PAGE_SIZE=Number(document.getElementById("deliveryPageSize")?.value||50);
   QUARANTINE_PAGE_SIZE=Number(document.getElementById("qPageSize")?.value||20);
   SL_PAGE_SIZE=Number(document.getElementById("slPageSize")?.value||50);
@@ -6009,12 +6024,12 @@ function updateDeliveryUx(){
   const count=uxFilterCount([document.getElementById("search")?.value,document.getElementById("dateFrom")?.value,document.getElementById("dateTo")?.value,document.getElementById("filter")?.value!=="all"?"status":"",document.getElementById("searchField")?.value!=="all"?"field":"",document.getElementById("searchOperator")?.value!=="contains"?"operator":""]);uxBadge("deliveryFilterCount",count);saveUxFilters();
 }
 function updateQuarantineUx(){
-  const count=uxFilterCount([document.getElementById("qSearch")?.value,document.getElementById("qDate")?.value,quarantineCategory!=="all"?"category":"",document.getElementById("qSearchField")?.value!=="all"?"field":"",document.getElementById("qSearchOperator")?.value!=="contains"?"operator":""]);uxBadge("qFilterCount",count);saveUxFilters();
+  const count=uxFilterCount([document.getElementById("qSearch")?.value,document.getElementById("qDate")?.value,quarantineCategory!=="all"?"category":"",quarantineAdminDecision!=="all"?"admin decision":"",document.getElementById("qSearchField")?.value!=="all"?"field":"",document.getElementById("qSearchOperator")?.value!=="contains"?"operator":""]);uxBadge("qFilterCount",count);saveUxFilters();
 }
 function updateSpamUx(){const count=uxFilterCount([document.getElementById("slSearch")?.value,document.getElementById("slPreference")?.value!=="all"?"pref":"",document.getElementById("slScope")?.value!=="all"?"scope":""]);uxBadge("slFilterCount",count);saveUxFilters();}
 function updateAuditUx(){const count=uxFilterCount([document.getElementById("auditSearch")?.value,document.getElementById("auditDateFrom")?.value,document.getElementById("auditDateTo")?.value,document.getElementById("auditAction")?.value!=="all"?"action":"",document.getElementById("auditSearchOperator")?.value!=="contains"?"operator":""]);uxBadge("auditFilterCount",count);saveUxFilters();}
 function clearDeliveryFilters(){document.getElementById("searchField").value="all";document.getElementById("searchOperator").value="contains";document.getElementById("search").value="";document.getElementById("dateFrom").value="";document.getElementById("dateTo").value="";document.getElementById("filter").value="all";p=1;updateDeliveryUx();load();}
-function clearQuarantineFilters(){document.getElementById("qSearchField").value="all";document.getElementById("qSearchOperator").value="contains";document.getElementById("qSearch").value="";document.getElementById("qDate").value="";quarantineCategory="all";document.querySelectorAll(".qmetric-filter").forEach(b=>b.classList.toggle("active",b.dataset.qfilter==="all"));qp=1;updateQuarantineUx();loadQuarantine(1);}
+function clearQuarantineFilters(){document.getElementById("qSearchField").value="all";document.getElementById("qSearchOperator").value="contains";document.getElementById("qSearch").value="";document.getElementById("qDate").value="";quarantineCategory="all";quarantineAdminDecision="all";const qAdminDecision=document.getElementById("qAdminDecision");if(qAdminDecision)qAdminDecision.value="all";document.querySelectorAll(".qmetric-filter").forEach(b=>b.classList.toggle("active",b.dataset.qfilter==="all"));qp=1;updateQuarantineUx();loadQuarantine(1);}
 function clearAuditFilters(){document.getElementById("auditSearchOperator").value="contains";document.getElementById("auditSearch").value="";document.getElementById("auditDateFrom").value="";document.getElementById("auditDateTo").value="";document.getElementById("auditAction").value="all";ap=1;updateAuditUx();loadAudit(1);}
 
 function conciseDetail(detail,status){
@@ -6621,6 +6636,7 @@ async function loadSummary(){
 let qp=1,qtp=1;
 let QUARANTINE_PAGE_SIZE=20;
 let quarantineCategory="all";
+let quarantineAdminDecision="all";
 const qSelected=new Set();
 let qVisibleEligible=[];
 
@@ -6745,6 +6761,13 @@ function openQuarantineHeader(pdpId){
 function closeQuarantineHeader(){document.getElementById("qHeaderModal")?.classList.remove("open");}
 function copyQuarantineHeader(){uxCopy(document.getElementById("qHeaderText")?.textContent||"");}
 
+function setQuarantineAdminDecision(value){
+  quarantineAdminDecision=["required","completed"].includes(String(value||"").toLowerCase())?String(value).toLowerCase():"all";
+  const el=document.getElementById("qAdminDecision"); if(el) el.value=quarantineAdminDecision;
+  loadQuarantine(1);
+}
+function openRequiredReviewQueue(){ setQuarantineAdminDecision("required"); }
+
 async function loadQuarantine(pageNumber=qp,options={}){
   qp=Math.max(1,pageNumber);
   if(!options.preserveSelection) qSelected.clear();
@@ -6754,6 +6777,7 @@ async function loadQuarantine(pageNumber=qp,options={}){
     q_operator:document.getElementById("qSearchOperator").value,
     date:document.getElementById("qDate").value,
     category:quarantineCategory,
+    admin_decision:quarantineAdminDecision,
     page:qp,
     page_size:QUARANTINE_PAGE_SIZE
   });
@@ -6770,6 +6794,9 @@ async function loadQuarantine(pageNumber=qp,options={}){
   uxSetRefresh("qLastRefresh");
   qp=data.page||1;
   document.getElementById("qTotal").textContent=data.total_items||0;
+  const reviewRequired=Number(data.review_queue?.required||0);
+  const reviewEl=document.getElementById("qReviewRequired"); if(reviewEl) reviewEl.textContent=reviewRequired.toLocaleString();
+  const adminFilter=document.getElementById("qAdminDecision"); if(adminFilter) adminFilter.value=quarantineAdminDecision;
   apiFetch("/api/quarantine/released-count").then(r=>r.json()).then(x=>{const el=document.getElementById("qReleased");if(el)el.textContent=Number(x.released||0).toLocaleString();}).catch(()=>{});
   document.getElementById("qSpam").textContent=data.counts?.spam||0;
   document.getElementById("qVirus").textContent=data.counts?.virus||0;

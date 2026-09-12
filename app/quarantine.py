@@ -809,7 +809,7 @@ def _text_filter_match(values, needle, operator):
     return any(needle in value for value in haystacks)
 
 
-def query_items(q="", q_field="all", q_operator="contains", date="", category="all", page=1, page_size=None):
+def query_items(q="", q_field="all", q_operator="contains", date="", category="all", page=1, page_size=None, admin_decision="all", decided_pdp_ids=None):
     q = (q or "").strip()
     q_field = (q_field or "all").strip().lower()
     if q_field not in {"all", "from", "to"}:
@@ -819,6 +819,10 @@ def query_items(q="", q_field="all", q_operator="contains", date="", category="a
         raise ValueError("Invalid text filter operator")
     date = (date or "").strip()
     category = (category or "all").strip()
+    admin_decision = (admin_decision or "all").strip().lower()
+    if admin_decision not in {"all", "required", "completed"}:
+        raise ValueError("Invalid Admin Decision filter")
+    decided_pdp_ids = {str(x or "").strip() for x in (decided_pdp_ids or set()) if str(x or "").strip()}
 
     with _cache_lock:
         source = list(cache["data"])
@@ -846,11 +850,24 @@ def query_items(q="", q_field="all", q_operator="contains", date="", category="a
             continue
         if category.lower() != "all" and item["category"].lower() != category.lower():
             continue
-        filtered.append(item)
+        has_admin_decision = str(item.get("pdp_id") or "") in decided_pdp_ids
+        if admin_decision == "required" and has_admin_decision:
+            continue
+        if admin_decision == "completed" and not has_admin_decision:
+            continue
+        row = dict(item)
+        row["admin_decision_required"] = not has_admin_decision
+        row["admin_decision_status"] = "REQUIRED" if not has_admin_decision else "COMPLETED"
+        filtered.append(row)
 
     top_domains = Counter(
         item["from_domain"] for item in filtered if item["from_domain"]
     ).most_common(10)
+
+    # Review Queue counters intentionally reflect all currently cached quarantine
+    # items, independent of the Admin Decision filter currently selected.
+    review_required = sum(1 for item in source if str(item.get("pdp_id") or "") not in decided_pdp_ids)
+    review_completed = max(0, len(source) - review_required)
 
     total_items = len(filtered)
     effective_page_size = ITEMS_PER_PAGE if page_size in (None, "") else max(10, min(200, int(page_size)))
@@ -881,6 +898,12 @@ def query_items(q="", q_field="all", q_operator="contains", date="", category="a
             "spam": counts.get("Spam", 0),
             "virus": counts.get("Virus", 0),
             "banned": counts.get("Banned", 0),
+        },
+        "review_queue": {
+            "required": review_required,
+            "completed": review_completed,
+            "total": len(source),
+            "filter": admin_decision,
         },
     }
 

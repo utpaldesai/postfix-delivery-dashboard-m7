@@ -1,9 +1,0 @@
-n(this.value)"><option value="all">All</option><option value="required">Required</option><option value="completed">Completed</option></select></div>
-   <button class="secondary-btn" onclick="loadQuarantine(1)">Refresh</button>
-   <button class="secondary-btn" type="button" onclick="clearQuarantineFilters()">Clear All</button>
-   <select id="qPageSize" class="ux-page-size" title="Rows per page">
-@@ -5842,6 +5855,7 @@
- 
-     <section class="help-card"><h3>R1.1.52 Training Provenance & Provider-Aware Transport</h3><p>Candidate training is restricted to CURRENT schema-v4 administrator Ground Truth sources only. Historical sa-learn, Bayes backfill, learning-correction and legacy-feature rows remain preserved for audit but are excluded from fitting and auto-train counts. Infrastructure AI also interprets Google and Microsoft transport-provider hops as contextual routing evidence rather than automatic spam/ham proof; authentication PASS remains identity evidence only.</p></section>
-     <section class="help-card"><h3>R1.1.53 Semantic Impersonation & Action-Intent Intelligence</h3><p>Message AI now derives relationship features that connect sender domain, recipient domain, mail-service claims, delivery/release language and action-link destinations. A single keyword can never force a SPAM proposal. A SHADOW-only semantic overlay is raised only when a multi-signal recipient-mail-service impersonation chain is present, such as an unrelated external sender claiming the recipient domain's mail service and directing the user to an action URL outside both domains. The original learned-model verdict/confidence is retained for audit, schema remains v4 with seven feature families, and only explicit Mail Admin Ground Truth can create a training label.</p></section>
-+    <section class="he

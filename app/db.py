@@ -2618,6 +2618,19 @@ def ai_ground_truth_current(source_sha256='', pdp_id=''):
                 row=cursor.fetchone()
             return row or None
 
+def ai_ground_truth_current_pdp_ids():
+    """Return quarantine PDP IDs that already have an authoritative CURRENT Admin Decision.
+
+    This is intentionally read-only and is used by the Quarantine Review Queue to
+    distinguish missing Admin Decisions from completed ones. Historical/superseded
+    rows never satisfy the review requirement.
+    """
+    with conn() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT DISTINCT pdp_id FROM ai_ground_truth_history WHERE status='CURRENT' AND pdp_id<>''")
+            return {str(row.get('pdp_id') or '').strip() for row in (cursor.fetchall() or []) if str(row.get('pdp_id') or '').strip()}
+
+
 def recent_ai_conflicts(limit=50):
     with conn() as connection:
         with connection.cursor() as cursor:

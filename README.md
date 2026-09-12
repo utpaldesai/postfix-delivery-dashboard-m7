@@ -1,3 +1,13 @@
+# Postfix Delivery Dashboard — R1.1.55 Admin Review Queue De-duplication + Semantic Intelligence
+
+## R1.1.55 Admin Review Queue De-duplication
+- Keeps the Quarantine Admin Decision filter: All / Required / Completed.
+- Required is derived only from missing CURRENT authoritative Admin Ground Truth; historical/non-authoritative rows do not clear the queue.
+- Keeps the Review Pending Messages hyperlink as the single queue-level entry point.
+- Removes the duplicate per-record Admin Decision Required / Review Now control because the existing Intelligence button opens the same review screen.
+- Opening Intelligence never creates a training label; only explicit Admin Ground Truth save/acknowledgement is training-eligible.
+- No destructive database migration and no mail-flow change.
+
 # R1.1.46 — Quarantine Intelligence Grid Realignment
 
 ## R1.1.47 — Email Analysis realignment + safe Amavis dry-run adapter
