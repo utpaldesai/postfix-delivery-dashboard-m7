@@ -16,9 +16,9 @@ with tempfile.TemporaryDirectory() as td:
 
     # Three reset-era schema-v4 labels are current-compatible.
     rows = [
-        {"sample_id":"n1","label":"HAM","feature_schema":4,"features":{"x":1},"hard_ham":True},
-        {"sample_id":"n2","label":"HAM","feature_schema":4,"features":{"x":1},"hard_ham":True},
-        {"sample_id":"n3","label":"SPAM","feature_schema":4,"features":{"y":1},"hard_ham":False},
+        {"sample_id":"n1","label":"HAM","feature_schema":4,"generation_id":"independent-g1","label_source":"admin-ground-truth-ui","status":"CURRENT","features":{"x":1},"hard_ham":True},
+        {"sample_id":"n2","label":"HAM","feature_schema":4,"generation_id":"independent-g1","label_source":"admin-ground-truth-ui","status":"CURRENT","features":{"x":1},"hard_ham":True},
+        {"sample_id":"n3","label":"SPAM","feature_schema":4,"generation_id":"independent-g1","label_source":"admin-ground-truth-ui","status":"CURRENT","features":{"y":1},"hard_ham":False},
     ]
     ai.DATASET.write_text("".join(json.dumps(r)+"\n" for r in rows), encoding="utf-8")
 

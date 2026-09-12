@@ -224,21 +224,9 @@ def _sa_learn(pdp_id: str, mode: str, remote_addr: str, username: str = ""):
         sa_learn_output=stdout or stderr,
     )
 
-    # AI branch: capture the explicit human verdict only after SpamAssassin
-    # learning succeeds. This is best-effort shadow training data collection;
-    # it never changes delivery, release, quarantine, or Bayes outcomes.
-    try:
-        from .ai_trainer import record_human_label
-        record_human_label(
-            pdp_id=pdp_id,
-            label=mode.upper(),
-            source_path=source,
-            item=snapshot,
-            username=username,
-            source="sa-learn",
-        )
-    except Exception as exc:
-        write_audit("AI_LABEL_CAPTURE_FAILED", pdp_id, remote_addr, username, detail=str(exc)[:1000])
+    # R1.1.52 provenance boundary: SpamAssassin/Bayes learning remains completely
+    # separate from AI Set-2 Ground Truth. Do not mirror sa-learn outcomes into
+    # the AI trainer; production Bayes behavior and audit history are unchanged.
 
     write_audit("LEARN_SPAM" if mode == "spam" else "LEARN_HAM", pdp_id, remote_addr, username, detail=(stdout or "learning complete")[:1000])
     with _cache_lock:
@@ -318,11 +306,9 @@ def correct_learning(pdp_id: str, new_mode: str, remote_addr: str, username: str
             sa_learn_rc=learned.returncode, examined_count=None, learned_count=None, source_sha256=source_sha256,
             sa_learn_output=f"CORRECTED {previous.upper()} -> {new_mode.upper()}: {output}",
         )
-        try:
-            from .ai_trainer import record_human_label
-            record_human_label(pdp_id=pdp_id, label=new_mode.upper(), source_path=source, item=snapshot, username=username, source="human-correction")
-        except Exception as exc:
-            write_audit("AI_LABEL_CORRECTION_FAILED", pdp_id, remote_addr, username, detail=str(exc)[:1000])
+        # AI Set-2 is intentionally not updated from sa-learn correction state.
+        # Any AI label change must be submitted separately through Mail Admin
+        # Ground Truth so provenance remains explicit and auditable.
 
         write_audit("CORRECT_TO_HAM" if new_mode == "ham" else "CORRECT_TO_SPAM", pdp_id, remote_addr, username, detail=f"Previous={previous.upper()} New={new_mode.upper()}; {output}"[:1000])
         with _cache_lock:
