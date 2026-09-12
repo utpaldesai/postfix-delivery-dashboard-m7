@@ -224,21 +224,9 @@ def _sa_learn(pdp_id: str, mode: str, remote_addr: str, username: str = ""):
         sa_learn_output=stdout or stderr,
     )
 
-    # AI branch: capture the explicit human verdict only after SpamAssassin
-    # learning succeeds. This is best-effort shadow training data collection;
-    # it never changes delivery, release, quarantine, or Bayes outcomes.
-    try:
-        from .ai_trainer import record_human_label
-        record_human_label(
-            pdp_id=pdp_id,
-            label=mode.upper(),
-            source_path=source,
-            item=snapshot,
-            username=username,
-            source="sa-learn",
-        )
-    except Exception as exc:
-        write_audit("AI_LABEL_CAPTURE_FAILED", pdp_id, remote_addr, username, detail=str(exc)[:1000])
+    # R1.1.52 provenance boundary: SpamAssassin/Bayes learning remains completely
+    # separate from AI Set-2 Ground Truth. Do not mirror sa-learn outcomes into
+    # the AI trainer; production Bayes behavior and audit history are unchanged.
 
     write_audit("LEARN_SPAM" if mode == "spam" else "LEARN_HAM", pdp_id, remote_addr, username, detail=(stdout or "learning complete")[:1000])
     with _cache_lock:
@@ -318,11 +306,9 @@ def correct_learning(pdp_id: str, new_mode: str, remote_addr: str, username: str
             sa_learn_rc=learned.returncode, examined_count=None, learned_count=None, source_sha256=source_sha256,
             sa_learn_output=f"CORRECTED {previous.upper()} -> {new_mode.upper()}: {output}",
         )
-        try:
-            from .ai_trainer import record_human_label
-            record_human_label(pdp_id=pdp_id, label=new_mode.upper(), source_path=source, item=snapshot, username=username, source="human-correction")
-        except Exception as exc:
-            write_audit("AI_LABEL_CORRECTION_FAILED", pdp_id, remote_addr, username, detail=str(exc)[:1000])
+        # AI Set-2 is intentionally not updated from sa-learn correction state.
+        # Any AI label change must be submitted separately through Mail Admin
+        # Ground Truth so provenance remains explicit and auditable.
 
         write_audit("CORRECT_TO_HAM" if new_mode == "ham" else "CORRECT_TO_SPAM", pdp_id, remote_addr, username, detail=f"Previous={previous.upper()} New={new_mode.upper()}; {output}"[:1000])
         with _cache_lock:
@@ -823,7 +809,7 @@ def _text_filter_match(values, needle, operator):
     return any(needle in value for value in haystacks)
 
 
-def query_items(q="", q_field="all", q_operator="contains", date="", category="all", page=1, page_size=None):
+def query_items(q="", q_field="all", q_operator="contains", date="", category="all", page=1, page_size=None, admin_decision="all", decided_pdp_ids=None):
     q = (q or "").strip()
     q_field = (q_field or "all").strip().lower()
     if q_field not in {"all", "from", "to"}:
@@ -833,6 +819,10 @@ def query_items(q="", q_field="all", q_operator="contains", date="", category="a
         raise ValueError("Invalid text filter operator")
     date = (date or "").strip()
     category = (category or "all").strip()
+    admin_decision = (admin_decision or "all").strip().lower()
+    if admin_decision not in {"all", "required", "completed"}:
+        raise ValueError("Invalid Admin Decision filter")
+    decided_pdp_ids = {str(x or "").strip() for x in (decided_pdp_ids or set()) if str(x or "").strip()}
 
     with _cache_lock:
         source = list(cache["data"])
@@ -860,11 +850,24 @@ def query_items(q="", q_field="all", q_operator="contains", date="", category="a
             continue
         if category.lower() != "all" and item["category"].lower() != category.lower():
             continue
-        filtered.append(item)
+        has_admin_decision = str(item.get("pdp_id") or "") in decided_pdp_ids
+        if admin_decision == "required" and has_admin_decision:
+            continue
+        if admin_decision == "completed" and not has_admin_decision:
+            continue
+        row = dict(item)
+        row["admin_decision_required"] = not has_admin_decision
+        row["admin_decision_status"] = "REQUIRED" if not has_admin_decision else "COMPLETED"
+        filtered.append(row)
 
     top_domains = Counter(
         item["from_domain"] for item in filtered if item["from_domain"]
     ).most_common(10)
+
+    # Review Queue counters intentionally reflect all currently cached quarantine
+    # items, independent of the Admin Decision filter currently selected.
+    review_required = sum(1 for item in source if str(item.get("pdp_id") or "") not in decided_pdp_ids)
+    review_completed = max(0, len(source) - review_required)
 
     total_items = len(filtered)
     effective_page_size = ITEMS_PER_PAGE if page_size in (None, "") else max(10, min(200, int(page_size)))
@@ -895,6 +898,12 @@ def query_items(q="", q_field="all", q_operator="contains", date="", category="a
             "spam": counts.get("Spam", 0),
             "virus": counts.get("Virus", 0),
             "banned": counts.get("Banned", 0),
+        },
+        "review_queue": {
+            "required": review_required,
+            "completed": review_completed,
+            "total": len(source),
+            "filter": admin_decision,
         },
     }
 

@@ -1,3 +1,13 @@
+# Postfix Delivery Dashboard — R1.1.55 Admin Review Queue De-duplication + Semantic Intelligence
+
+## R1.1.55 Admin Review Queue De-duplication
+- Keeps the Quarantine Admin Decision filter: All / Required / Completed.
+- Required is derived only from missing CURRENT authoritative Admin Ground Truth; historical/non-authoritative rows do not clear the queue.
+- Keeps the Review Pending Messages hyperlink as the single queue-level entry point.
+- Removes the duplicate per-record Admin Decision Required / Review Now control because the existing Intelligence button opens the same review screen.
+- Opening Intelligence never creates a training label; only explicit Admin Ground Truth save/acknowledgement is training-eligible.
+- No destructive database migration and no mail-flow change.
+
 # R1.1.46 — Quarantine Intelligence Grid Realignment
 
 ## R1.1.47 — Email Analysis realignment + safe Amavis dry-run adapter
@@ -957,3 +967,17 @@ Adds an offline curator for the public `rf-peixoto/phishing_pot/email` corpus. T
 Use `tools/curate-phishing-pot.py /path/to/phishing_pot/email --limit 500` on a separately obtained local copy to deduplicate candidate `.eml` messages by normalized body hash and emit privacy-reduced research records for human curation. No network access is performed by the dashboard or curator.
 
 Fraud Intelligence Repository seed advances to `fraud-intel-2026.09.03-v2` and adds generalized credential-phishing, BEC payment-redirection, invoice-fraud, and callback-phishing phrase families. Existing MariaDB is upgraded idempotently by the existing repository seeder; no database recreation is permitted.
+
+## R1.1.52 — Clean Training Provenance + Provider-Aware Hop Intelligence
+
+- AI candidate fitting and auto-train eligibility are restricted to explicit authoritative Mail Admin Ground Truth for the current independent generation/schema.
+- Historical `sa-learn`, Bayes/learning-correction, legacy-feature and superseded rows remain preserved for audit but are excluded from clean Set-2 candidate fitting.
+- SpamAssassin Learn HAM / Learn SPAM actions no longer silently create AI training labels.
+- Infrastructure AI adds provider-aware trusted-hop context for Google Workspace, Microsoft 365 and other observed routes. MX/provider/authentication evidence is contextual only and never independently implies HAM or SPAM.
+- Missing SPF/DKIM/DMARC/DNS evidence remains UNKNOWN rather than negative evidence.
+- Feature schema v4, seven independent feature families, Hard-HAM weight 1.75 and SHADOW ONLY behavior remain unchanged.
+
+## R1.1.53 — Semantic Impersonation & Action-Intent Intelligence
+
+R1.1.53 keeps schema v4, the seven independent feature families, Hard-HAM weight 1.75, SHADOW ONLY operation, and the R1.1.52 clean-training-provenance boundary. Message AI adds relationship-derived features for recipient-domain mail-service impersonation, delivery/release lures, credential-action language, and action URLs external to both sender and recipient domains. A high-confidence semantic overlay requires multiple independent relationships and can only raise a shadow SPAM/CREDENTIAL_PHISHING proposal; it never changes Postfix/Amavis/SpamAssassin behavior and never creates Ground Truth. The underlying learned-model verdict/confidence is preserved alongside the overlay for calibration and audit.
+

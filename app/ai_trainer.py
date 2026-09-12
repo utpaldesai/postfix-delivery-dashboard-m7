@@ -3,7 +3,7 @@
 Safety guarantees:
 - Never participates in SMTP/Amavis delivery decisions.
 - Never writes to SpamAssassin Bayes tables.
-- Learns only from explicit human HAM/SPAM actions already accepted by sa-learn.
+- Learns only from authoritative administrator Ground Truth actions; SpamAssassin/sa-learn state is audit-only and never training authority.
 - Uses only independent raw-message, authentication/alignment, URL/domain, contextual BEC/NLP, privacy-reduced stylometric/structural and MIME/attachment features; no SpamAssassin/Amavis verdict/score/rule features, no sandboxing, and no network lookups.
 - Hard-HAM examples receive additional training weight to reduce false positives.
 - Stores privacy-reduced hashed feature vectors under QUARANTINE_STATE_DIR/ai-trainer.
@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
 from typing import Dict, Iterable
 from urllib.parse import urlsplit
@@ -55,6 +55,7 @@ QUARANTINE_DIR = Path(os.getenv("QUARANTINE_DIR", "/host-amavis/virusmails"))
 CURRENT_FEATURE_SCHEMA = 4
 CURRENT_GENERATION = os.getenv("AI_TRAINER_GENERATION", "independent-g1").strip() or "independent-g1"
 CURRENT_AUTH_POLICY = "identity-neutral-v1"
+AUTHORITATIVE_LABEL_SOURCES = frozenset({"admin-ground-truth", "admin-ground-truth-ui", "admin-ai-acknowledged"})
 HAM_CLASSIFICATIONS = {
     "LEGITIMATE_BUSINESS", "EXPECTED_TRANSACTIONAL", "APPROVED_NEWSLETTER",
     "INTERNAL_OR_TRUSTED", "PERSONAL_OR_DIRECT", "OTHER_HAM",
@@ -215,6 +216,97 @@ def _domain_aligned(left: str, right: str) -> bool:
         return False
     return left == right or left.endswith("." + right) or right.endswith("." + left)
 
+
+
+
+def _semantic_intent_evidence(msg, combined_text: str, from_domain: str, url_domains: list[str]) -> dict:
+    """Derive relationship-based phishing/impersonation evidence from raw RFC822 only.
+
+    This is a SHADOW-only, explainable signal layer. It never consumes
+    SpamAssassin/Amavis verdicts and never writes a training label. The rules
+    intentionally require multiple independent relationships so a single phrase
+    such as "pending email" can never force a SPAM proposal by itself.
+    """
+    recipients = getaddresses([str(msg.get("To", "") or ""), str(msg.get("Cc", "") or "")])
+    recipient_domains = sorted({
+        addr.rsplit("@", 1)[1].lower().strip(".[]")
+        for _name, addr in recipients if "@" in str(addr or "")
+    })
+    text = str(combined_text or "").lower()
+    mail_service_phrases = (
+        "pending email", "pending emails", "pending message", "pending messages",
+        "mail server", "mail services", "mailbox", "email delivery",
+        "delivery confirmation", "confirm delivery", "release pending",
+        "release email", "release emails", "quarantined email", "quarantined message",
+    )
+    delivery_release_phrases = (
+        "confirm delivery", "release pending email", "release pending emails",
+        "release email", "release emails", "pending email delivery",
+        "emails stuck", "messages stuck", "action required",
+    )
+    credential_phrases = (
+        "verify your account", "verify account", "verify mailbox", "sign in",
+        "log in", "login", "password", "credentials", "confirm identity",
+        "authenticate",
+    )
+    mail_hits = sorted({x for x in mail_service_phrases if x in text})
+    release_hits = sorted({x for x in delivery_release_phrases if x in text})
+    credential_hits = sorted({x for x in credential_phrases if x in text})
+    mentioned_recipient_domains = [d for d in recipient_domains if d and d in text]
+    sender_external_to_recipient = bool(
+        from_domain and recipient_domains and all(not _domain_aligned(from_domain, d) for d in recipient_domains)
+    )
+    external_to_sender = sorted({d for d in url_domains if from_domain and not _domain_aligned(d, from_domain)})
+    external_to_recipient = sorted({
+        d for d in url_domains
+        if recipient_domains and all(not _domain_aligned(d, r) for r in recipient_domains)
+    })
+    external_action_domains = sorted(set(external_to_sender).intersection(external_to_recipient))
+
+    signals = []
+    score = 0
+    if mail_hits:
+        signals.append("MAIL_SERVICE_LURE"); score += 1
+    if release_hits:
+        signals.append("DELIVERY_RELEASE_LURE"); score += 2
+    if credential_hits:
+        signals.append("CREDENTIAL_ACTION_LURE"); score += 2
+    if mentioned_recipient_domains:
+        signals.append("RECIPIENT_DOMAIN_MENTIONED"); score += 1
+    if sender_external_to_recipient and mentioned_recipient_domains and mail_hits:
+        signals.append("EXTERNAL_SENDER_CLAIMS_RECIPIENT_MAIL_SERVICE"); score += 4
+    if external_action_domains:
+        signals.append("ACTION_URL_EXTERNAL_TO_SENDER_AND_RECIPIENT"); score += 2
+    if sender_external_to_recipient and release_hits and external_action_domains:
+        signals.append("RECIPIENT_MAIL_SERVICE_EXTERNAL_ACTION"); score += 4
+
+    # Immediate shadow proposal requires a conjunction of relationship evidence,
+    # not any single keyword. This avoids hard-coding ordinary business phrases.
+    high_confidence = (
+        score >= 8
+        and "EXTERNAL_SENDER_CLAIMS_RECIPIENT_MAIL_SERVICE" in signals
+        and "RECIPIENT_MAIL_SERVICE_EXTERNAL_ACTION" in signals
+        and len(signals) >= 4
+    )
+    semantic_confidence = min(99.0, 80.0 + min(19.0, max(0, score - 7) * 3.0)) if high_confidence else None
+    return {
+        "available": True,
+        "shadow_only": True,
+        "score": score,
+        "signals": signals,
+        "recipient_domains": recipient_domains,
+        "mentioned_recipient_domains": mentioned_recipient_domains,
+        "external_action_domains": external_action_domains[:12],
+        "mail_service_phrase_hits": mail_hits[:12],
+        "delivery_release_phrase_hits": release_hits[:12],
+        "credential_phrase_hits": credential_hits[:12],
+        "high_confidence": high_confidence,
+        "suggested_label": "SPAM" if high_confidence else "",
+        "suggested_classification": "CREDENTIAL_PHISHING" if high_confidence else "",
+        "confidence": round(semantic_confidence, 2) if semantic_confidence is not None else None,
+        "authority": "NONE",
+        "note": "Relationship-based raw-message evidence only; never changes mail flow or creates Ground Truth.",
+    }
 
 def _auth_result(text: str, mechanism: str) -> str:
     match = re.search(r"\b" + re.escape(mechanism) + r"\s*=\s*(pass|fail|softfail|neutral|none|temperror|permerror|policy)", str(text or ""), re.I)
@@ -432,6 +524,19 @@ def _extract_features_and_meta(path: Path, item: dict | None = None):
         if not aligned_urls and len(url_domains) >= 2:
             meta["hard_ham_score"] += 1
 
+    # R1.1.53: semantic relationship features remain inside the existing v4
+    # families (NLP/header/URL). No eighth family and no schema bump are needed.
+    semantic = _semantic_intent_evidence(msg, combined_text, from_domain, url_domains)
+    meta["semantic_intent"] = semantic
+    for signal in semantic.get("signals", []):
+        token = str(signal or "").lower()
+        if token:
+            features[_hash_token("semantic:" + token)] += 1
+    if semantic.get("external_action_domains"):
+        features[_hash_token("url:external_to_sender_and_recipient")] += min(4, len(semantic["external_action_domains"]))
+    if semantic.get("high_confidence"):
+        features[_hash_token("semantic:recipient_service_impersonation_chain")] += 1
+
     # Detect visible-link / href destination mismatch locally. Never follows or opens the URL.
     for part in msg.walk():
         if str(part.get_content_type() or "").lower() != "text/html":
@@ -576,11 +681,12 @@ def _dataset_signature_values():
 def _rebuild_status_snapshot_from_dataset():
     """One-time/repair path: scan immutable JSONL, then persist compact counters.
 
-    Normal live status refreshes never call this unless the snapshot is missing or
-    the JSONL signature changed outside the normal label-write path.
+    R1.1.52 counts only provenance-clean, administrator-authoritative rows as the
+    trainable dataset. Historical sa-learn/human-correction/legacy rows remain
+    immutable for audit but are excluded from candidate fitting and auto-train.
     """
     all_rows = _dataset_rows() if AI_ENABLED else []
-    rows = [row for row in all_rows if _row_is_current_generation(row)]
+    rows = [row for row in all_rows if _row_is_training_eligible(row)]
     legacy_rows = [row for row in all_rows if not _row_is_current_generation(row)]
     counts = Counter(row["label"] for row in rows)
     mtime_ns, size = _dataset_signature_values()
@@ -764,7 +870,7 @@ def record_human_label(pdp_id: str, label: str, source_path: Path, item: dict | 
             latest = {((r.get("source_sha256") or r.get("sample_id"))): r for r in existing}
             latest[sha] = row
             dedup = list(latest.values())
-            current_rows = [r for r in dedup if _row_is_current_generation(r)]
+            current_rows = [r for r in dedup if _row_is_training_eligible(r)]
             legacy_rows = [r for r in dedup if not _row_is_current_generation(r)]
             counts_now = Counter(r.get("label") for r in current_rows)
             mtime_ns, dataset_size = _dataset_signature_values()
@@ -844,10 +950,38 @@ def _row_is_current_generation(row: dict) -> bool:
     generation = str(row.get("generation_id") or "").strip()
     if generation:
         return generation == CURRENT_GENERATION and int(row.get("feature_schema") or 0) >= CURRENT_FEATURE_SCHEMA
-    # Compatibility bridge for labels created after the clean-start reset but
-    # before generation_id was added.  They are schema-v4 rows in the reset
-    # dataset and are treated as current; all future rows carry generation_id.
+    # Compatibility bridge remains audit-visible only. Training eligibility below
+    # additionally requires an explicit administrator-authoritative source.
     return int(row.get("feature_schema") or 0) >= CURRENT_FEATURE_SCHEMA
+
+
+def _row_is_training_eligible(row: dict) -> bool:
+    """Return True only for provenance-clean Set-2 administrator Ground Truth.
+
+    Historical rows are intentionally never deleted.  This gate prevents
+    SpamAssassin/Bayes/sa-learn state, old backfills and learning corrections
+    from silently becoming AI labels while keeping the complete audit trail.
+    """
+    if not _row_is_current_generation(row):
+        return False
+    source = str(row.get("label_source") or "").strip().lower()
+    return source in AUTHORITATIVE_LABEL_SOURCES
+
+
+def _training_eligibility_audit(rows=None) -> dict:
+    rows = list(_dataset_rows() if rows is None else rows)
+    current = [r for r in rows if _row_is_current_generation(r)]
+    eligible = [r for r in current if _row_is_training_eligible(r)]
+    excluded = [r for r in current if not _row_is_training_eligible(r)]
+    reasons = Counter(str(r.get("label_source") or "[missing]").strip().lower() or "[missing]" for r in excluded)
+    return {
+        "all_unique_rows": len(rows),
+        "current_generation_rows": len(current),
+        "eligible_rows": len(eligible),
+        "excluded_non_authoritative_rows": len(excluded),
+        "excluded_by_label_source": dict(sorted(reasons.items())),
+        "authoritative_label_sources": sorted(AUTHORITATIVE_LABEL_SOURCES),
+    }
 
 
 def _model_is_current_generation(model: dict | None) -> bool:
@@ -1109,7 +1243,7 @@ def train_candidate(username: str = "", trigger: str = "manual"):
         raise RuntimeError("AI trainer is disabled")
     with _lock:
         migration = migrate_legacy_feature_rows()
-        rows = [row for row in _dataset_rows() if _row_is_current_generation(row)]
+        rows = [row for row in _dataset_rows() if _row_is_training_eligible(row)]
         rows = _rows_for_current_auth_policy(rows)
         counts = Counter(row["label"] for row in rows)
         if counts["HAM"] < MIN_PER_CLASS or counts["SPAM"] < MIN_PER_CLASS:
@@ -1210,6 +1344,30 @@ def _load_model(path: Path):
         return None
 
 
+def _apply_semantic_shadow_overlay(result: dict, semantic: dict | None) -> dict:
+    """Combine learned model output with high-confidence semantic evidence in SHADOW only.
+
+    The original calibrated model result is always retained. The overlay can only
+    raise a manual-review SPAM proposal when a multi-signal recipient-mail-service
+    impersonation chain is present; it has no SMTP/Amavis authority.
+    """
+    out = dict(result or {})
+    semantic = dict(semantic or {})
+    out["model_verdict"] = out.get("verdict")
+    out["model_confidence"] = out.get("confidence")
+    out["model_probabilities"] = out.get("probabilities")
+    out["semantic_intent"] = semantic
+    out["decision_source"] = "LEARNED_MODEL"
+    out["semantic_override"] = False
+    if semantic.get("high_confidence") and str(semantic.get("suggested_label") or "").upper() == "SPAM":
+        out["verdict"] = "SPAM"
+        out["confidence"] = semantic.get("confidence")
+        out["suggested_classification"] = semantic.get("suggested_classification") or "CREDENTIAL_PHISHING"
+        out["decision_source"] = "SEMANTIC_INTENT_OVERLAY"
+        out["semantic_override"] = str(out.get("model_verdict") or "").upper() != "SPAM"
+    return out
+
+
 def predict_file(source_path: Path, item: dict | None = None):
     if not AI_ENABLED:
         return {"enabled": False, "shadow_only": True, "available": False}
@@ -1221,8 +1379,8 @@ def predict_file(source_path: Path, item: dict | None = None):
             "enabled": True, "shadow_only": True, "available": False,
             "reason": "Independent generation started. No active independent model has been promoted yet.",
         }
-    features = extract_features(source_path, None)
-    result = _predict_model(model, features)
+    features, feature_meta = _extract_features_and_meta(source_path, None)
+    result = _apply_semantic_shadow_overlay(_predict_model(model, features), feature_meta.get("semantic_intent"))
     return {"enabled": True, "shadow_only": True, "available": True, "model_version": model.get("version"), "algorithm": model.get("algorithm"), "attachment_intelligence": attachment_intelligence(source_path), **result}
 
 
@@ -1244,8 +1402,8 @@ def predict_shadow_candidate_file(source_path: Path, item: dict | None = None):
             "enabled": True, "shadow_only": True, "available": False, "model_role": "candidate",
             "reason": "No candidate model is available for the current independent generation.",
         }
-    features = extract_features(source_path, None)
-    result = _predict_model(model, features)
+    features, feature_meta = _extract_features_and_meta(source_path, None)
+    result = _apply_semantic_shadow_overlay(_predict_model(model, features), feature_meta.get("semantic_intent"))
     return {
         "enabled": True, "shadow_only": True, "available": True, "model_role": "candidate",
         "model_version": model.get("version"), "algorithm": model.get("algorithm"),
@@ -1277,7 +1435,7 @@ def _maybe_schedule_auto_train():
     candidate = _load_model(CANDIDATE_MODEL)
     if not _model_is_current_generation(candidate):
         candidate = None
-    current = len([row for row in _dataset_rows() if _row_is_current_generation(row)])
+    current = len([row for row in _dataset_rows() if _row_is_training_eligible(row)])
     baseline = int(candidate.get("dataset_samples", 0)) if candidate else 0
     if current - baseline < AUTO_TRAIN_AFTER_NEW_LABELS:
         return False
@@ -1326,12 +1484,18 @@ def status():
     next_auto = None
     if AUTO_TRAIN_AFTER_NEW_LABELS > 0:
         next_auto = max(0, AUTO_TRAIN_AFTER_NEW_LABELS - labels_since_candidate)
+    eligibility = _training_eligibility_audit() if AI_ENABLED else {
+        "all_unique_rows": 0, "current_generation_rows": 0, "eligible_rows": 0,
+        "excluded_non_authoritative_rows": 0, "excluded_by_label_source": {},
+        "authoritative_label_sources": sorted(AUTHORITATIVE_LABEL_SOURCES),
+    }
     result={
         "enabled": AI_ENABLED, "shadow_only": True, "state_dir": str(STATE_DIR),
         "dataset_samples": dataset_samples, "ham_labels": int(snapshot.get("ham_labels") or 0), "spam_labels": int(snapshot.get("spam_labels") or 0),
         "hard_ham_labels": int(snapshot.get("hard_ham_labels") or 0),
         "feature_schema": CURRENT_FEATURE_SCHEMA, "generation_id": CURRENT_GENERATION,
         "legacy_feature_labels": int(snapshot.get("legacy_feature_labels") or 0),
+        "training_eligibility": eligibility,
         "legacy_candidate_archived": bool(stored_candidate and candidate is None),
         "legacy_active_archived": bool(stored_active and active is None),
         "hard_ham_weight": HARD_HAM_WEIGHT,

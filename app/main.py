@@ -71,6 +71,7 @@ from .db import (
     ai_ti_status,
     record_ai_ground_truth_calibration,
     ai_ground_truth_current,
+    ai_ground_truth_current_pdp_ids,
     get_postfix_ingest_state,
     set_postfix_ingest_state,
     store_postfix_raw_events_batch,
@@ -1479,6 +1480,7 @@ def quarantine_list(
     q_operator: str = "contains",
     date: str = "",
     category: str = "all",
+    admin_decision: str = "all",
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=10, le=200),
 ):
@@ -1487,13 +1489,19 @@ def quarantine_list(
         raise HTTPException(status_code=400, detail="Invalid quarantine search field")
     if q_operator.strip().lower() not in TEXT_FILTER_OPERATORS:
         raise HTTPException(status_code=400, detail="Invalid text filter operator")
+    admin_decision = str(admin_decision or "all").strip().lower()
+    if admin_decision not in {"all", "required", "completed"}:
+        raise HTTPException(status_code=400, detail="Invalid Admin Decision filter")
     try:
+        decided_pdp_ids = ai_ground_truth_current_pdp_ids()
         result = quarantine_query_items(
             q=q,
             q_field=q_field.strip().lower(),
             q_operator=q_operator.strip().lower(),
             date=date,
             category=category,
+            admin_decision=admin_decision,
+            decided_pdp_ids=decided_pdp_ids,
             page=page,
             page_size=page_size,
         )
@@ -1790,31 +1798,18 @@ def ai_trainer_backfill_api(
     request: Request,
     username: str = Depends(require_permission("quarantine", "admin")),
 ):
+    """R1.1.52: legacy sa-learn backfill is deliberately disabled.
+
+    Existing rows remain preserved for audit, but SpamAssassin/Bayes state is no
+    longer permitted to create Set-2 AI training labels.
+    """
     remote_addr = _quarantine_acl(request)
-    imported = duplicates = missing = failed = 0
-    for label, db_path in (("SPAM", quarantine_learn_spam_db), ("HAM", quarantine_learn_ham_db)):
-        for pdp_id in sorted(quarantine_flagged_ids(db_path)):
-            try:
-                source = quarantine_source_path(pdp_id)
-            except Exception:
-                missing += 1
-                continue
-            try:
-                result = ai_record_human_label(
-                    pdp_id=pdp_id, label=label, source_path=source,
-                    item=quarantine_item_for(pdp_id) or {}, username=username,
-                    source="existing-sa-learn-state",
-                )
-                if result.get("duplicate"):
-                    duplicates += 1
-                elif result.get("ok"):
-                    imported += 1
-                else:
-                    failed += 1
-            except Exception:
-                failed += 1
-    result = {"ok": True, "imported": imported, "duplicates": duplicates, "missing_files": missing, "failed": failed}
-    quarantine_write_audit("AI_LABEL_BACKFILL", "ai-trainer", remote_addr, username, detail=json.dumps(result)[:1000])
+    result = {
+        "ok": True, "disabled": True, "imported": 0, "duplicates": 0,
+        "missing_files": 0, "failed": 0,
+        "reason": "sa-learn/Bayes labels are audit-only and are not AI training authority in R1.1.52",
+    }
+    quarantine_write_audit("AI_LABEL_BACKFILL_BLOCKED", "ai-trainer", remote_addr, username, detail=json.dumps(result)[:1000])
     return result
 
 
@@ -5218,6 +5213,10 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <div class="metric-icon">✓</div>
     <div><span>Released</span><b id="qReleased">0</b><small>Count only</small></div>
   </div>
+  <div class="qreview-metric" aria-label="Admin Review Queue">
+    <div class="metric-icon">☑</div>
+    <div><span>Admin Review Queue</span><b id="qReviewRequired">0</b><small>Decision Required</small><br><button type="button" class="qreview-link" onclick="openRequiredReviewQueue()">Review Pending Messages</button></div>
+  </div>
   <div class="qmetric updated">
     <div class="metric-icon">◷</div>
     <div>
@@ -5250,6 +5249,7 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <label>Date</label>
     <input id="qDate" type="date" title="Quarantine date">
   </div>
+  <div class="filter-group"><label>Admin Decision</label><select id="qAdminDecision" onchange="setQuarantineAdminDecision(this.value)"><option value="all">All</option><option value="required">Required</option><option value="completed">Completed</option></select></div>
   <button class="secondary-btn" onclick="loadQuarantine(1)">Refresh</button>
   <button class="secondary-btn" type="button" onclick="clearQuarantineFilters()">Clear All</button>
   <select id="qPageSize" class="ux-page-size" title="Rows per page">
@@ -5839,7 +5839,7 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <section class="help-card"><h3>Email Analysis</h3><p>Email Analysis is calibrated to the AI Trainer. Paste RFC822 source or upload/drag an .eml file or a native Microsoft Outlook .msg file; when a current-generation candidate exists, the workbench uses that candidate for SHADOW ONLY inspection and displays its generation, schema and algorithm. The page uses a balanced full-width input layout followed by side-by-side Independent AI and Amavis / SpamAssassin Dry Run cards, a comparison strip, and supporting authentication/campaign evidence. The dry-run adapter is disabled until an explicitly configured analysis-only helper is available; it never submits to production Amavis SMTP port 10024. Message AI, Infrastructure AI and Campaign AI remain independent of SpamAssassin/Amavis decisions. Uploaded message content is temporary and is not added to quarantine, Bayes learning or AI training.</p></section>
     <section class="help-card"><h3>Amavis Log Intelligence</h3><p>Read-only intelligence correlates the current message and release-generated Queue IDs with <code>/var/lib/amavis/logs/amavis.log</code> (mounted read-only as <code>/host-amavis/logs/amavis.log</code>). Amavis-reported attachment filenames, archive-member descriptors and related log content are normalized into persistent MariaDB history and can be viewed for the current message. The dashboard does not open attachments, execute content, extract archives, or inspect mailbox contents.</p></section>
     <section class="help-card"><h3>BEC / Impersonation Intelligence</h3><p>Email Analysis evaluates identity, authentication and intent separately. It highlights display-name deception, email-address-in-display-name patterns, From/Reply-To mismatch, look-alike domains, shared-mail infrastructure context, payment/bank-change language, urgency/secrecy lures, suspicious links and attachment context. SPF/DKIM/DMARC PASS is identity/alignment evidence only and contributes no positive HAM trust weight. Fully authenticated UCE, phishing and compromised-account mail can still be SPAM. The first view stays simple; expand the evidence when deeper review is required.</p></section>
-    <section class="help-card"><h3>SpamAssassin Learning & Human Correction</h3><p>Learn Spam and Learn Ham use the existing host SpamAssassin/Bayes database. If a human verdict was wrong, use Correct to HAM or Correct to SPAM on the same retained message. The dashboard runs sa-learn --forget first, learns the corrected class, keeps the original audit event, records the correction, and makes the newest approved AI label supersede the earlier label for training.</p></section>
+    <section class="help-card"><h3>SpamAssassin Learning & Human Correction</h3><p>Learn Spam and Learn Ham use the existing host SpamAssassin/Bayes database only. They do not create AI training labels. If a SpamAssassin learning verdict was wrong, Correct to HAM or Correct to SPAM updates Bayes and its audit trail, but AI Set-2 training remains restricted to explicit Mail Admin Ground Truth actions.</p></section>
     <section class="help-card"><h3>Release Verification</h3><p>A successful release command alone is not treated as final delivery proof. When Amavis/Postfix returns a release Queue ID, the dashboard records it under Release Status and follows that Queue ID through the existing Postfix delivery database to show QUEUED, DELIVERED, DEFERRED, BOUNCED or other final state. Older releases without a captured Queue ID are shown as legacy/unverified.</p></section>
     <section class="help-card"><h3>Whitelist / Blacklist</h3><p>Manage SpamAssassin SQL preferences in the userpref table. Supported whitelist preferences are whitelist_auth and whitelist_from; blacklist uses blacklist_from. View permission permits inspection; Admin permits add, edit and delete.</p></section>
     <section class="help-card"><h3>Manage Email Size</h3><p>Manages message-size limits using two aligned side-by-side vertical cards: Submission — Port 587 and Webmail. Each card shows the active limit, a compact four-digit-width numeric New Limit field, the MB unit and its own Update action. The configured host policy still enforces its permitted range. Access requires Mail Size Admin permission; privileged host changes use the loopback-only helper and are audited.</p></section>
@@ -5852,6 +5852,10 @@ Total final recipient records: <b id="summaryTotal">0</b>
     <section class="help-card"><h3>Session Security</h3><p>Sessions use an idle timeout plus an absolute lifetime. Login throttling, same-site cookies and request-origin protection are enabled by Security Pack 1.</p></section>
     <section class="help-card"><h3>Quarantine Safety</h3><p>The quarantine directory is mounted read-only. The dashboard never deletes, moves, renames, truncates or overwrites quarantine objects. Release uses the host Amavis PDP workflow; analysis uploads are temporary and do not alter quarantine state.</p></section>
     <section class="help-card"><h3>Three-Tier AI Threat Intelligence</h3><p>R1.1.45 adds self-contained Infrastructure AI and Campaign AI evidence alongside Message AI. Infrastructure AI evaluates locally observed Received-header sender host/HELO consistency, source IP, offline ASN, authentication failures, sender/reply/message-ID relationships and local IP/ASN rotation. Campaign AI stores privacy-reduced one-way fingerprints for locally observed quarantine messages and correlates repeated templates, sender-domain rotation, source-IP diversity, multi-ASN behavior and URL-domain-set reuse over a 30-day local window. The Correlation Engine is SHADOW ONLY and has no Postfix, Amavis, release, quarantine or automatic ground-truth authority. Manual uploaded email analysis does not add samples to the production campaign repository.</p></section>
+
+    <section class="help-card"><h3>R1.1.52 Training Provenance & Provider-Aware Transport</h3><p>Candidate training is restricted to CURRENT schema-v4 administrator Ground Truth sources only. Historical sa-learn, Bayes backfill, learning-correction and legacy-feature rows remain preserved for audit but are excluded from fitting and auto-train counts. Infrastructure AI also interprets Google and Microsoft transport-provider hops as contextual routing evidence rather than automatic spam/ham proof; authentication PASS remains identity evidence only.</p></section>
+    <section class="help-card"><h3>R1.1.53 Semantic Impersonation & Action-Intent Intelligence</h3><p>Message AI now derives relationship features that connect sender domain, recipient domain, mail-service claims, delivery/release language and action-link destinations. A single keyword can never force a SPAM proposal. A SHADOW-only semantic overlay is raised only when a multi-signal recipient-mail-service impersonation chain is present, such as an unrelated external sender claiming the recipient domain's mail service and directing the user to an action URL outside both domains. The original learned-model verdict/confidence is retained for audit, schema remains v4 with seven feature families, and only explicit Mail Admin Ground Truth can create a training label.</p></section>
+    <section class="help-card"><h3>R1.1.55 Admin Review Queue De-duplication</h3><p>Quarantine exposes a persistent <b>Admin Decision</b> filter with All / Required / Completed states. <b>Required</b> means the quarantine item has no authoritative CURRENT administrator Ground Truth row. The Review Queue count and <b>Review Pending Messages</b> hyperlink open that filtered queue. To inspect a pending item, use the existing <b>Intelligence</b> button; the duplicate per-row <b>Admin Decision Required / Review Now</b> control has been removed. Opening Intelligence never creates Ground Truth; only an explicit administrator save/acknowledgement does. Historical or superseded rows do not satisfy the requirement.</p></section>
     <section class="help-card"><h3>Quarantine Intelligence Grid Layout</h3><p>R1.1.51 keeps Quarantine Intelligence in explicit aligned review and evidence rows. AI Shadow Intelligence and Mail Admin Ground Truth stay paired on desktop; Current Data and Metrics remain equal-width; Independent Attachment Intelligence occupies the complete AI evidence row without an unused blank column; Infrastructure AI and Campaign AI remain paired and equal-width beneath it. GEO-IP and Sender Policy share a balanced support row, while Amavis trace and Learning History remain full-width. The layout collapses cleanly on smaller screens.</p></section>
     <section class="help-card"><h3>GEO-IP Database</h3><p>GEO-IP enrichment is offline. To enable location and ASN details, install compatible MaxMind GeoLite2/GeoIP2 MMDB files in the configured data/geoip directory. If databases are absent, the dashboard still reports the observed public source IP without contacting an external lookup service.</p></section>
   </div>
@@ -6002,7 +6006,7 @@ function uxSetRefresh(id){const el=document.getElementById(id);if(el)el.textCont
 function uxFilterCount(values){return values.filter(Boolean).length;}
 function uxBadge(id,count){const el=document.getElementById(id);if(!el)return;el.textContent=`${count} filter${count===1?"":"s"} active`;el.classList.toggle("active",count>0);}
 function saveUxFilters(){
-  const ids=["searchField","searchOperator","search","dateFrom","dateTo","filter","deliveryPageSize","qSearchField","qSearchOperator","qSearch","qDate","qPageSize","slSearch","slPreference","slScope","slPageSize","auditSearchOperator","auditSearch","auditDateFrom","auditDateTo","auditAction","auditPageSize"];
+  const ids=["searchField","searchOperator","search","dateFrom","dateTo","filter","deliveryPageSize","qSearchField","qSearchOperator","qSearch","qDate","qAdminDecision","qPageSize","slSearch","slPreference","slScope","slPageSize","auditSearchOperator","auditSearch","auditDateFrom","auditDateTo","auditAction","auditPageSize"];
   const data={};ids.forEach(id=>{const el=document.getElementById(id);if(el)data[id]=el.value;});data.quarantineCategory=quarantineCategory;
   try{localStorage.setItem(UX_FILTER_KEY,JSON.stringify(data));}catch(_){}
 }
@@ -6010,6 +6014,7 @@ function restoreUxFilters(){
   let data={};try{data=JSON.parse(localStorage.getItem(UX_FILTER_KEY)||"{}");}catch(_){}
   Object.entries(data).forEach(([id,value])=>{if(id==="quarantineCategory")return;const el=document.getElementById(id);if(el && [...el.options||[]].some(o=>o.value===String(value)) || (el && !el.options))el.value=value;});
   if(data.quarantineCategory)quarantineCategory=data.quarantineCategory;
+  quarantineAdminDecision=["required","completed"].includes(String(document.getElementById("qAdminDecision")?.value||"").toLowerCase())?String(document.getElementById("qAdminDecision").value).toLowerCase():"all";
   DELIVERY_PAGE_SIZE=Number(document.getElementById("deliveryPageSize")?.value||50);
   QUARANTINE_PAGE_SIZE=Number(document.getElementById("qPageSize")?.value||20);
   SL_PAGE_SIZE=Number(document.getElementById("slPageSize")?.value||50);
@@ -6019,12 +6024,12 @@ function updateDeliveryUx(){
   const count=uxFilterCount([document.getElementById("search")?.value,document.getElementById("dateFrom")?.value,document.getElementById("dateTo")?.value,document.getElementById("filter")?.value!=="all"?"status":"",document.getElementById("searchField")?.value!=="all"?"field":"",document.getElementById("searchOperator")?.value!=="contains"?"operator":""]);uxBadge("deliveryFilterCount",count);saveUxFilters();
 }
 function updateQuarantineUx(){
-  const count=uxFilterCount([document.getElementById("qSearch")?.value,document.getElementById("qDate")?.value,quarantineCategory!=="all"?"category":"",document.getElementById("qSearchField")?.value!=="all"?"field":"",document.getElementById("qSearchOperator")?.value!=="contains"?"operator":""]);uxBadge("qFilterCount",count);saveUxFilters();
+  const count=uxFilterCount([document.getElementById("qSearch")?.value,document.getElementById("qDate")?.value,quarantineCategory!=="all"?"category":"",quarantineAdminDecision!=="all"?"admin decision":"",document.getElementById("qSearchField")?.value!=="all"?"field":"",document.getElementById("qSearchOperator")?.value!=="contains"?"operator":""]);uxBadge("qFilterCount",count);saveUxFilters();
 }
 function updateSpamUx(){const count=uxFilterCount([document.getElementById("slSearch")?.value,document.getElementById("slPreference")?.value!=="all"?"pref":"",document.getElementById("slScope")?.value!=="all"?"scope":""]);uxBadge("slFilterCount",count);saveUxFilters();}
 function updateAuditUx(){const count=uxFilterCount([document.getElementById("auditSearch")?.value,document.getElementById("auditDateFrom")?.value,document.getElementById("auditDateTo")?.value,document.getElementById("auditAction")?.value!=="all"?"action":"",document.getElementById("auditSearchOperator")?.value!=="contains"?"operator":""]);uxBadge("auditFilterCount",count);saveUxFilters();}
 function clearDeliveryFilters(){document.getElementById("searchField").value="all";document.getElementById("searchOperator").value="contains";document.getElementById("search").value="";document.getElementById("dateFrom").value="";document.getElementById("dateTo").value="";document.getElementById("filter").value="all";p=1;updateDeliveryUx();load();}
-function clearQuarantineFilters(){document.getElementById("qSearchField").value="all";document.getElementById("qSearchOperator").value="contains";document.getElementById("qSearch").value="";document.getElementById("qDate").value="";quarantineCategory="all";document.querySelectorAll(".qmetric-filter").forEach(b=>b.classList.toggle("active",b.dataset.qfilter==="all"));qp=1;updateQuarantineUx();loadQuarantine(1);}
+function clearQuarantineFilters(){document.getElementById("qSearchField").value="all";document.getElementById("qSearchOperator").value="contains";document.getElementById("qSearch").value="";document.getElementById("qDate").value="";quarantineCategory="all";quarantineAdminDecision="all";const qAdminDecision=document.getElementById("qAdminDecision");if(qAdminDecision)qAdminDecision.value="all";document.querySelectorAll(".qmetric-filter").forEach(b=>b.classList.toggle("active",b.dataset.qfilter==="all"));qp=1;updateQuarantineUx();loadQuarantine(1);}
 function clearAuditFilters(){document.getElementById("auditSearchOperator").value="contains";document.getElementById("auditSearch").value="";document.getElementById("auditDateFrom").value="";document.getElementById("auditDateTo").value="";document.getElementById("auditAction").value="all";ap=1;updateAuditUx();loadAudit(1);}
 
 function conciseDetail(detail,status){
@@ -6631,6 +6636,7 @@ async function loadSummary(){
 let qp=1,qtp=1;
 let QUARANTINE_PAGE_SIZE=20;
 let quarantineCategory="all";
+let quarantineAdminDecision="all";
 const qSelected=new Set();
 let qVisibleEligible=[];
 
@@ -6755,6 +6761,13 @@ function openQuarantineHeader(pdpId){
 function closeQuarantineHeader(){document.getElementById("qHeaderModal")?.classList.remove("open");}
 function copyQuarantineHeader(){uxCopy(document.getElementById("qHeaderText")?.textContent||"");}
 
+function setQuarantineAdminDecision(value){
+  quarantineAdminDecision=["required","completed"].includes(String(value||"").toLowerCase())?String(value).toLowerCase():"all";
+  const el=document.getElementById("qAdminDecision"); if(el) el.value=quarantineAdminDecision;
+  loadQuarantine(1);
+}
+function openRequiredReviewQueue(){ setQuarantineAdminDecision("required"); }
+
 async function loadQuarantine(pageNumber=qp,options={}){
   qp=Math.max(1,pageNumber);
   if(!options.preserveSelection) qSelected.clear();
@@ -6764,6 +6777,7 @@ async function loadQuarantine(pageNumber=qp,options={}){
     q_operator:document.getElementById("qSearchOperator").value,
     date:document.getElementById("qDate").value,
     category:quarantineCategory,
+    admin_decision:quarantineAdminDecision,
     page:qp,
     page_size:QUARANTINE_PAGE_SIZE
   });
@@ -6780,6 +6794,9 @@ async function loadQuarantine(pageNumber=qp,options={}){
   uxSetRefresh("qLastRefresh");
   qp=data.page||1;
   document.getElementById("qTotal").textContent=data.total_items||0;
+  const reviewRequired=Number(data.review_queue?.required||0);
+  const reviewEl=document.getElementById("qReviewRequired"); if(reviewEl) reviewEl.textContent=reviewRequired.toLocaleString();
+  const adminFilter=document.getElementById("qAdminDecision"); if(adminFilter) adminFilter.value=quarantineAdminDecision;
   apiFetch("/api/quarantine/released-count").then(r=>r.json()).then(x=>{const el=document.getElementById("qReleased");if(el)el.textContent=Number(x.released||0).toLocaleString();}).catch(()=>{});
   document.getElementById("qSpam").textContent=data.counts?.spam||0;
   document.getElementById("qVirus").textContent=data.counts?.virus||0;
@@ -6960,13 +6977,14 @@ async function analyzeEmailMessage(){
       <div class="email-analysis-primary-row">
         <section class="ai-ea-verdict">
           <div class="ai-ea-verdict-head"><div><div class="email-analysis-note"><h4 style="margin:0">Independent AI Analysis</h4>TRAINER-CALIBRATED · CURRENT CANDIDATE</div><div class="ai-ea-verdict-big">${esc(aiVerdict)} · ${aiConfidence}</div></div><span class="engine-status operational">SHADOW ONLY</span></div>
-          <div class="ai-ea-modelbar"><div><span>Generation</span><b>${esc(trainer.generation_id||ai.generation_id||"-")}</b></div><div><span>Schema</span><b>v${esc(trainer.feature_schema||ai.feature_schema||"-")}</b></div><div><span>Candidate</span><b>${esc(candidate?.version||ai.model_version||"None")}</b></div><div><span>Active</span><b>${esc(active?.version||"None")}</b></div><div><span>Algorithm</span><b>${esc(ai.algorithm||candidate?.algorithm||"-")}</b></div></div>
+          <div class="ai-ea-modelbar"><div><span>Generation</span><b>${esc(trainer.generation_id||ai.generation_id||"-")}</b></div><div><span>Schema</span><b>v${esc(trainer.feature_schema||ai.feature_schema||"-")}</b></div><div><span>Candidate</span><b>${esc(candidate?.version||ai.model_version||"None")}</b></div><div><span>Active</span><b>${esc(active?.version||"None")}</b></div><div><span>Algorithm</span><b>${esc(ai.algorithm||candidate?.algorithm||"-")}</b></div><div><span>Decision source</span><b>${esc(ai.decision_source||"LEARNED_MODEL")}</b></div></div>
           <div class="ai-ea-engine-grid">
             <div class="ai-ea-engine"><h5>Message AI <span class="engine-status operational">OPERATIONAL</span></h5>NLP/text, stylometry, URLs/domains, MIME/attachments, authentication alignment and sender/header anomalies.<small>Schema-v4 local independent evidence.</small></div>
             <div class="ai-ea-engine"><h5>Infrastructure AI <span class="engine-status operational">LOCAL</span></h5>Score <b>${esc(data.threat_intelligence?.infrastructure?.score??"-")}</b>/100 · source ${esc(data.threat_intelligence?.infrastructure?.source_ip||"-")} · ${data.threat_intelligence?.infrastructure?.asn?`AS${esc(data.threat_intelligence.infrastructure.asn)}`:"ASN unavailable"}.<small>${esc((data.threat_intelligence?.infrastructure?.signals||[]).slice(0,3).map(x=>x.code).join(" · ")||"No elevated local infrastructure signal")}</small></div>
             <div class="ai-ea-engine"><h5>Campaign AI <span class="engine-status operational">LOCAL</span></h5>Score <b>${esc(data.threat_intelligence?.campaign?.score??"-")}</b>/100 · template observations ${esc(data.threat_intelligence?.campaign?.stats?.template_messages??0)}.<small>${esc((data.threat_intelligence?.campaign?.signals||[]).slice(0,3).map(x=>x.code).join(" · ")||"No local campaign cluster threshold crossed")}</small></div>
           </div>
-          <div class="ai-ea-separation">AI prediction is not ground truth. This manual analysis uses the current candidate only for shadow inspection and never writes a training label or alters delivery.</div>
+          ${ai.semantic_intent?.available?`<details class="email-analysis-evidence" ${ai.semantic_intent.high_confidence?"open":""}><summary>Semantic impersonation / intent evidence</summary><div class="email-analysis-kv"><span>Relationship score</span><b>${esc(ai.semantic_intent.score??0)}</b><span>Suggested classification</span><b>${esc(ai.semantic_intent.suggested_classification||"-")}</b><span>Signals</span><b>${esc((ai.semantic_intent.signals||[]).join(" · ")||"No high-confidence chain")}</b><span>External action domains</span><b>${esc((ai.semantic_intent.external_action_domains||[]).join(" · ")||"-")}</b></div></details>`:""}
+          <div class="ai-ea-separation">AI prediction is not ground truth. R1.1.53 may raise a SHADOW-only semantic SPAM proposal only when multiple raw-message relationship signals agree; it never writes a training label or alters delivery.</div>
         </section>
         <section id="emailAmavisDryRun" class="amavis-dryrun-card"><div class="ai-ea-verdict-head"><div><h4>Amavis / SpamAssassin Dry Run</h4><div class="email-analysis-note">Dedicated analysis-only helper · never production SMTP 10024</div></div><span class="amavis-dryrun-state">CHECKING</span></div><div class="email-analysis-note">Dry-run status will appear here.</div><div class="amavis-dryrun-safety">NO delivery · NO quarantine write · NO release · NO Bayes/sa-learn · NO AI ground truth · NO production queue insertion.</div></section>
       </div>
@@ -7031,7 +7049,7 @@ async function openQuarantineIntelligence(pdpId){
     const fraudIntel=data.fraud_intelligence||{};
     const aiTrainer=data.ai_trainer||{};
     const proposedLabel=aiProposal.available?String(aiProposal.verdict||"").toUpperCase():String(fraudIntel.suggested_label||"").toUpperCase();
-    const proposedClass=proposedLabel==="SPAM"?String(fraudIntel.suggested_classification||"OTHER_SPAM").toUpperCase():(proposedLabel==="HAM"?"OTHER_HAM":"");
+    const proposedClass=proposedLabel==="SPAM"?String(aiProposal.suggested_classification||fraudIntel.suggested_classification||"OTHER_SPAM").toUpperCase():(proposedLabel==="HAM"?"OTHER_HAM":"");
     const aiVerdict=ai.available?`${esc(ai.verdict||"-")} (${esc(ai.confidence??"-")}%)`:esc(ai.reason||"No active AI model");
     const aiActive=aiTrainer.active?.version||"None";
     const aiCandidate=aiTrainer.candidate?.version||"None";
@@ -7054,7 +7072,7 @@ async function openQuarantineIntelligence(pdpId){
         <section class="qintel-card qintel-ai qintel-ai-primary"><h4>AI Shadow Intelligence <span id="aiLiveBadge" class="qintel-live-badge">LIVE · 10s</span></h4><div class="qintel-kv">
           <span>Mode</span><b>SHADOW ONLY</b>
           <span>AI Generation</span><b id="aiLiveGeneration">${esc(aiTrainer.generation_id||"independent-g1")}</b><span>Authentication policy</span><b id="aiLiveAuthPolicy">${esc(aiTrainer.authentication_policy||"identity-neutral-v1")}</b>
-          <span>Prediction source</span><b>${aiProposal.available?`Candidate ${esc(aiCandidate)}`:(aiActive!=="None"?`Active ${esc(aiActive)}`:"No promoted model")}</b>
+          <span>Prediction source</span><b>${aiProposal.available?(aiProposal.decision_source==="SEMANTIC_INTENT_OVERLAY"?`Semantic intent overlay + Candidate ${esc(aiCandidate)}`:`Candidate ${esc(aiCandidate)}`):(aiActive!=="None"?`Active ${esc(aiActive)}`:"No promoted model")}</b>
           <span>Prediction status</span><b>${aiVerdict}</b>
           <span>Active candidate model</span><b>${esc(aiCandidate)}</b>
           <span>Active model</span><b class="qintel-active-none">${esc(aiActive)}${aiActive==="None"?" (No promoted model)":""}</b>
@@ -7068,7 +7086,7 @@ async function openQuarantineIntelligence(pdpId){
               <span>Candidate model</span><b id="aiLiveCandidate">${esc(aiCandidate)}</b>
               <span>Training labels</span><b id="aiLiveLabels">${esc(aiTrainer.dataset_samples??0)} (HAM ${esc(aiTrainer.ham_labels??0)} / SPAM ${esc(aiTrainer.spam_labels??0)})</b>
               <span>Hard-HAM labels</span><b id="aiLiveHardHam">${esc(aiTrainer.hard_ham_labels??0)} · weight ${esc(aiTrainer.hard_ham_weight??1)}</b>
-              <span>Feature schema</span><b id="aiLiveSchema">v${esc(aiTrainer.feature_schema??1)} · ${esc((aiTrainer.feature_families||[]).length||0)} independent feature families</b>
+              <span>Feature schema</span><b id="aiLiveSchema">v${esc(aiTrainer.feature_schema??1)} · ${esc((aiTrainer.feature_families||[]).length||0)} independent feature families</b><span>Training provenance</span><b id="aiLiveProvenance">ADMIN GROUND TRUTH ONLY · excluded ${esc(aiTrainer.training_eligibility?.excluded_non_authoritative_rows??0)} historical/non-authoritative rows</b>
               <span>Auto-train</span><b id="aiLiveAutoTrain">${aiTrainer.auto_train_after_new_labels>0?esc("Every "+aiTrainer.auto_train_after_new_labels+" new labels; next in "+aiTrainer.next_auto_train_in+(aiTrainer.auto_train_running?" — RUNNING":"")):"Disabled"}</b>
             </div>
             <div id="aiLiveCurrentUpdated" class="qintel-live-updated">Live feed initialized from current request.</div>
@@ -7089,17 +7107,18 @@ async function openQuarantineIntelligence(pdpId){
           </div>
         </div>
         <div class="qintel-ai-note">AI never controls Postfix, Amavis, SpamAssassin, release, or quarantine decisions. Explicit Mail Admin HAM/SPAM ground truth supplies AI labels independently of SpamAssassin/Amavis learning. Automatic retraining creates a candidate only; activation remains explicit and affects shadow prediction only.</div>
+        ${aiProposal.semantic_intent?.available?`<div class="qintel-ai-metrics qintel-ai-metrics-single" style="margin-top:10px"><div class="qintel-ai-metric"><h4>Semantic Impersonation / Intent Intelligence</h4><div class="qintel-ai-grid"><span>Assessment</span><b>${aiProposal.semantic_intent.high_confidence?"HIGH-CONFIDENCE PHISHING PATTERN":"CONTEXTUAL"}</b><span>Suggested classification</span><b>${esc(aiProposal.semantic_intent.suggested_classification||"-")}</b><span>Relationship score</span><b>${esc(aiProposal.semantic_intent.score??0)}</b><span>Signals</span><b>${esc((aiProposal.semantic_intent.signals||[]).join(" · ")||"No multi-signal impersonation chain")}</b><span>Recipient domain(s)</span><b>${esc((aiProposal.semantic_intent.recipient_domains||[]).join(" · ")||"-")}</b><span>External action domain(s)</span><b>${esc((aiProposal.semantic_intent.external_action_domains||[]).join(" · ")||"-")}</b></div><div class="qintel-ai-note">R1.1.53 raw-message relationship analysis. A single phrase never forces SPAM; the shadow overlay requires external sender + recipient mail-service impersonation + release/action lure + an action URL external to both sender and recipient. No SpamAssassin/Amavis verdict is consumed.</div></div></div>`:""}
         ${aiProposal.attachment_intelligence?.available?`<div class="qintel-ai-metrics qintel-ai-metrics-single" style="margin-top:10px"><div class="qintel-ai-metric"><h4>Independent Attachment Intelligence</h4><div class="qintel-ai-grid"><span>Risk</span><b>${esc(aiProposal.attachment_intelligence.risk||"NORMAL")}</b><span>Nested archive</span><b>${aiProposal.attachment_intelligence.nested_archive?"YES":"NO"}</b><span>Archive depth</span><b>${esc(aiProposal.attachment_intelligence.archive_depth??0)}</b><span>Dangerous members</span><b>${esc(aiProposal.attachment_intelligence.dangerous_member_count??0)}</b><span>Detected</span><b>${esc((aiProposal.attachment_intelligence.dangerous_members||[]).map(x=>x.name).slice(0,8).join(" · ")||"None")}</b></div><div class="qintel-ai-note">Local-only bounded archive inspection. Members are never executed and no Amavis/SpamAssassin verdict is used as an AI feature.</div></div></div>`:""}
         <div class="qintel-ai-metrics" style="margin-top:10px"><div class="qintel-ai-metric"><h4>Infrastructure AI · LOCAL</h4><div class="qintel-ai-grid"><span>Score</span><b>${esc(data.threat_intelligence?.infrastructure?.score??"-")}/100</b><span>Source IP</span><b>${esc(data.threat_intelligence?.infrastructure?.source_ip||"-")}</b><span>Observed PTR/from</span><b>${esc(data.threat_intelligence?.infrastructure?.observed_reverse_name||"-")}</b><span>Observed HELO</span><b>${esc(data.threat_intelligence?.infrastructure?.observed_helo||"-")}</b><span>ASN</span><b>${data.threat_intelligence?.infrastructure?.asn?`AS${esc(data.threat_intelligence.infrastructure.asn)} — ${esc(data.threat_intelligence.infrastructure.asn_organization||"")}`:"-"}</b><span>Signals</span><b>${esc((data.threat_intelligence?.infrastructure?.signals||[]).map(x=>x.code).slice(0,5).join(" · ")||"No elevated signal")}</b></div></div><div class="qintel-ai-metric"><h4>Campaign AI · LOCAL</h4><div class="qintel-ai-grid"><span>Score</span><b>${esc(data.threat_intelligence?.campaign?.score??"-")}/100</b><span>Template seen</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_messages??0)} message(s)</b><span>Sender domains</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_distinct_sender_domains??0)}</b><span>Source IPs</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_distinct_source_ips??0)}</b><span>ASNs</span><b>${esc(data.threat_intelligence?.campaign?.stats?.template_distinct_asns??0)}</b><span>Signals</span><b>${esc((data.threat_intelligence?.campaign?.signals||[]).map(x=>x.code).slice(0,5).join(" · ")||"No cluster threshold crossed")}</b></div></div></div>
         <div class="qintel-ai-note" style="margin-top:8px">Three-tier correlation: <b>${esc(data.threat_intelligence?.correlation?.assessment||"Unavailable")}</b> · score <b>${esc(data.threat_intelligence?.correlation?.score??"-")}/100</b> · SHADOW ONLY · authority NONE. Local observations only; no third-party threat feed.</div>
-        ${canTrainAI?`<div class="qintel-ai-actions"><button type="button" onclick="aiBackfillLabels()">Sync Existing Labels</button><button type="button" onclick="aiTrainCandidate()">Train Candidate</button><button id="aiLivePromoteButton" type="button" onclick="aiPromoteCandidate()" ${aiCandidate==="None"?"disabled":""}>Activate Candidate Model</button></div>`:""}
+        ${canTrainAI?`<div class="qintel-ai-actions"><button type="button" onclick="aiBackfillLabels()">Training Provenance Audit</button><button type="button" onclick="aiTrainCandidate()">Train Candidate</button><button id="aiLivePromoteButton" type="button" onclick="aiPromoteCandidate()" ${aiCandidate==="None"?"disabled":""}>Activate Candidate Model</button></div>`:""}
         </section>
         ${canTrainAI?`<section class="qintel-card qintel-ground-truth"><h4>Mail Admin Ground Truth <span class="geo-badge">AI ONLY</span></h4>
           <div id="aiGtSavedState" class="qintel-ai-note" style="margin-bottom:10px"></div>
           <div class="qintel-gt-top">
             <div class="qintel-proposal-box"><div class="qintel-section-label">AI Proposal (Pre-filled)</div><div class="qintel-kv"><span>AI proposed decision</span><b id="aiGtProposalLabel">${esc(proposedLabel||"NO PROPOSAL")}${aiProposal.available?` · ${esc(aiProposal.confidence??"-")}%`:""}</b>
             <span>AI proposed classification</span><b id="aiGtProposalClass">${esc(proposedClass||"-")}</b>
-            <span>Source</span><b>${aiProposal.available?`Candidate ${esc(aiCandidate)}`:"Repository hypothesis only"}</b>
+            <span>Source</span><b>${aiProposal.available?(aiProposal.decision_source==="SEMANTIC_INTENT_OVERLAY"?`Semantic intent overlay + Candidate ${esc(aiCandidate)}`:`Candidate ${esc(aiCandidate)}`):"Repository hypothesis only"}</b>
             <span>Local intelligence repository</span><b>${esc(fraudIntel.repo_version||"-")}</b>
             <span>Hypothesis</span><b>${esc(fraudIntel.primary?.taxonomy_code||"No harmful-email hypothesis triggered")}</b></div></div>
             <div class="qintel-gt-info">The AI proposal is pre-filled for administrator review. This is AI-only Ground Truth and does not call sa-learn, change Bayes, release quarantine, or alter Amavis/Postfix delivery.<br><br>Acknowledge if correct, or change decision/classification before saving.<br><br>Only explicit administrator action creates Set-2 Ground Truth.</div>
@@ -7180,6 +7199,7 @@ function aiLiveApplyStatus(status){
   aiLiveSetText("aiLiveLabels",`${status?.dataset_samples??0} (HAM ${status?.ham_labels??0} / SPAM ${status?.spam_labels??0})`);
   aiLiveSetText("aiLiveHardHam",`${status?.hard_ham_labels??0} · weight ${status?.hard_ham_weight??1}`);
   aiLiveSetText("aiLiveSchema",`v${status?.feature_schema??1} · ${(status?.feature_families||[]).length||0} independent feature families`);
+  aiLiveSetText("aiLiveProvenance",`ADMIN GROUND TRUTH ONLY · excluded ${status?.training_eligibility?.excluded_non_authoritative_rows??0} historical/non-authoritative rows`);
   aiLiveSetText("aiLiveAutoTrain",status?.auto_train_after_new_labels>0?`Every ${status.auto_train_after_new_labels} new labels; next in ${status.next_auto_train_in}${status.auto_train_running?" — RUNNING":""}`:"Disabled");
   aiLiveSetText("aiLiveAlgorithm",status?.candidate?.algorithm||"Not trained");
   aiLiveSetText("aiLiveAccuracy",aiLivePercent(metrics.accuracy));
@@ -7300,18 +7320,17 @@ async function submitAiGroundTruth(mode="auto"){
 }
 
 async function aiBackfillLabels(){
-  if(!window.confirm("Import existing successful HAM/SPAM learning labels whose quarantine files are still retained? No Bayes data will be changed.")) return;
   try{
     const response=await apiFetch("/api/ai-trainer/backfill",{method:"POST"});
     const data=await response.json().catch(()=>({}));
-    if(!response.ok) throw new Error(data.detail||"AI label sync failed");
-    alert(`AI labels synced: ${data.imported||0} new, ${data.duplicates||0} already present, ${data.missing_files||0} source files no longer retained.`);
+    if(!response.ok) throw new Error(data.detail||"Training provenance audit failed");
+    alert(data.reason||"Legacy learning labels are preserved for audit and excluded from AI training.");
     await refreshAiTrainerLiveStatus();
-  }catch(error){ alert(error.message||"AI label sync failed"); }
+  }catch(error){ alert(error.message||"Training provenance audit failed"); }
 }
 
 async function aiTrainCandidate(){
-  if(!window.confirm("Train a new AI candidate from accumulated human HAM/SPAM labels? The active model and mail flow will not change.")) return;
+  if(!window.confirm("Train a new AI candidate from authoritative administrator Ground Truth only? Legacy/sa-learn labels remain audit-only. The active model and mail flow will not change.")) return;
   const body=document.getElementById("qintelBody");
   try{
     const response=await apiFetch("/api/ai-trainer/train",{method:"POST"});

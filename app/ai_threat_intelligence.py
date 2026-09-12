@@ -1,6 +1,6 @@
 """Self-contained three-tier mail threat intelligence for SHADOW inspection.
 
-R1.1.45 boundaries:
+R1.1.52 boundaries:
 - No SMTP, Postfix, Amavis, quarantine, release or mailbox decision authority.
 - No network reputation/API dependency. ASN enrichment is offline MMDB only.
 - Message AI remains the independent trainer/candidate. This module adds local
@@ -18,6 +18,9 @@ import html
 import ipaddress
 import os
 import re
+import socket
+import struct
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from email import policy
@@ -33,7 +36,7 @@ from .db import (
 )
 from .geoip_intelligence import enrich_ip, received_public_ips
 
-ENGINE_VERSION = "local-ti-v1"
+ENGINE_VERSION = "local-ti-v1.1-provider-aware"
 CAMPAIGN_WINDOW_DAYS = max(1, min(3650, int(os.getenv("AI_TI_CAMPAIGN_WINDOW_DAYS", "30"))))
 
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>\"']{4,2048}")
@@ -44,6 +47,135 @@ _HELO_RE = re.compile(r"(?i)\b(?:helo|ehlo)[=\s]+([^\s;)]+)")
 _BY_HOST_RE = re.compile(r"(?i)\bby\s+([^\s()]+)")
 _DKIM_D_RE = re.compile(r"(?i)\bheader\.d\s*=\s*([^\s;]+)|\bd\s*=\s*([^\s;]+)")
 _AUTH_RE = re.compile(r"(?i)\b(spf|dkim|dmarc)\s*=\s*(pass|fail|softfail|neutral|none|temperror|permerror|policy)")
+
+_GOOGLE_HOST_SUFFIXES = (".google.com", ".googlemail.com", ".gmail.com")
+_MICROSOFT_HOST_SUFFIXES = (".outlook.com", ".protection.outlook.com", ".office365.com", ".microsoft.com")
+_GOOGLE_CONSUMER_DOMAINS = {"gmail.com", "googlemail.com"}
+_MICROSOFT_CONSUMER_DOMAINS = {"outlook.com", "hotmail.com", "live.com", "msn.com"}
+_MX_CACHE: dict[str, tuple[float, dict]] = {}
+_MX_CACHE_TTL = max(300, min(86400, int(os.getenv("AI_TI_MX_CACHE_TTL_SECONDS", "21600"))))
+_MX_TIMEOUT = max(0.05, min(1.0, float(os.getenv("AI_TI_MX_TIMEOUT_SECONDS", "0.35"))))
+
+def _dns_name(data: bytes, offset: int) -> tuple[str, int]:
+    labels=[]; jumped=False; end=offset; seen=set()
+    while offset < len(data):
+        if offset in seen: break
+        seen.add(offset)
+        length=data[offset]
+        if length==0:
+            offset += 1
+            if not jumped: end=offset
+            break
+        if length & 0xC0 == 0xC0:
+            if offset+1 >= len(data): break
+            ptr=((length & 0x3F)<<8) | data[offset+1]
+            if not jumped: end=offset+2
+            offset=ptr; jumped=True; continue
+        offset += 1
+        if offset+length > len(data): break
+        labels.append(data[offset:offset+length].decode("ascii","ignore"))
+        offset += length
+        if not jumped: end=offset
+    return ".".join(x for x in labels if x).lower().strip("."), end
+
+def _resolver_ip() -> str:
+    try:
+        for line in Path("/etc/resolv.conf").read_text(errors="ignore").splitlines():
+            parts=line.split()
+            if len(parts)>=2 and parts[0]=="nameserver":
+                return parts[1]
+    except Exception:
+        pass
+    return ""
+
+def _mx_provider_lookup(domain: str) -> dict:
+    """Bounded DNS MX verification for Infrastructure AI only.
+
+    This result is never included in the model feature vector and never controls
+    delivery. DNS failure is UNKNOWN, not suspicious.
+    """
+    domain=str(domain or "").lower().strip(".")
+    if not domain:
+        return {"status":"NO_DOMAIN","provider":"unknown","targets":[],"network_lookup":False}
+    cached=_MX_CACHE.get(domain)
+    now=time.monotonic()
+    if cached and now-cached[0] < _MX_CACHE_TTL:
+        return dict(cached[1], cached=True)
+    resolver=_resolver_ip()
+    if not resolver:
+        result={"status":"NO_RESOLVER","provider":"unknown","targets":[],"network_lookup":False}
+        _MX_CACHE[domain]=(now,result); return result
+    try:
+        ident=int.from_bytes(os.urandom(2),"big")
+        qname=b"".join(bytes([len(x)])+x.encode("idna") for x in domain.split("."))+b"\x00"
+        packet=struct.pack("!HHHHHH",ident,0x0100,1,0,0,0)+qname+struct.pack("!HH",15,1)
+        family=socket.AF_INET6 if ":" in resolver else socket.AF_INET
+        sock=socket.socket(family,socket.SOCK_DGRAM); sock.settimeout(_MX_TIMEOUT)
+        try:
+            sock.sendto(packet,(resolver,53)); data,_=sock.recvfrom(4096)
+        finally:
+            sock.close()
+        if len(data)<12:
+            raise ValueError("short DNS response")
+        rid,flags,qd,an,_,_=struct.unpack("!HHHHHH",data[:12])
+        if rid!=ident or (flags & 0x000F):
+            raise ValueError("DNS response error")
+        off=12
+        for _ in range(qd):
+            _,off=_dns_name(data,off); off += 4
+        targets=[]
+        for _ in range(an):
+            _,off=_dns_name(data,off)
+            if off+10>len(data): break
+            rtype,rclass,ttl,rdlen=struct.unpack("!HHIH",data[off:off+10]); off += 10
+            rstart=off; off += rdlen
+            if rtype==15 and rclass==1 and rdlen>=3:
+                _,nameoff=(struct.unpack("!H",data[rstart:rstart+2])[0], rstart+2)
+                target,_=_dns_name(data,nameoff)
+                if target and target not in targets: targets.append(target)
+        providers={_transport_provider(t) for t in targets}
+        provider="google" if "google" in providers else ("microsoft" if "microsoft" in providers else ("other" if targets else "unknown"))
+        result={"status":"OK" if targets else "NO_MX","provider":provider,"targets":targets[:8],"network_lookup":True}
+    except Exception as exc:
+        result={"status":"LOOKUP_FAILED","provider":"unknown","targets":[],"network_lookup":True,"error":str(exc)[:120]}
+    _MX_CACHE[domain]=(now,result)
+    return result
+
+
+def _transport_provider(host: str) -> str:
+    value = str(host or "").lower().strip(".[]() ")
+    if not value:
+        return "unknown"
+    if any(value == suffix.lstrip(".") or value.endswith(suffix) for suffix in _GOOGLE_HOST_SUFFIXES):
+        return "google"
+    if any(value == suffix.lstrip(".") or value.endswith(suffix) for suffix in _MICROSOFT_HOST_SUFFIXES):
+        return "microsoft"
+    return "other"
+
+def _provider_route_observation(msg) -> dict:
+    """Describe provider transitions without treating them as verdict evidence.
+
+    Received headers are newest->oldest and lower blocks can be sender-supplied.
+    We therefore expose provider transitions as contextual observations only; no
+    provider mismatch adds risk by itself. The newest public-provider hop is the
+    most trustworthy external transport observation available in the message.
+    """
+    hops=[]
+    for idx, value in enumerate(_received_headers(msg)[:12]):
+        fm=_FROM_HOST_RE.search(value)
+        by=_BY_HOST_RE.search(value)
+        from_host=(fm.group(1).strip(".;[]() ").lower() if fm else "")
+        by_host=(by.group(1).strip(".;[]() ").lower() if by else "")
+        provider=_transport_provider(from_host)
+        if from_host:
+            hops.append({"index": idx, "from_host": from_host, "by_host": by_host, "provider": provider})
+    providers=[h["provider"] for h in hops if h["provider"] in {"google","microsoft"}]
+    transitions=[]
+    for a,b in zip(providers, providers[1:]):
+        if a!=b:
+            transitions.append(f"{b}->{a}")  # chronological older->newer
+    ingress=next((h for h in hops if h["provider"] in {"google","microsoft"}), None)
+    return {"ingress_provider": (ingress or {}).get("provider","unknown"), "provider_transitions": transitions[:8], "hops": hops[:8]}
 
 
 def _domain(address: str) -> str:
@@ -211,6 +343,7 @@ def analyze_bytes(raw: bytes, *, message_ai: dict | None = None, source_kind: st
     mid_domain = _message_id_domain(str(msg.get("Message-ID", "") or ""))
     auth = _auth(msg)
     transport = _oldest_public_received(msg)
+    provider_route = _provider_route_observation(msg)
     geo = enrich_ip(transport["source_ip"]) if transport["source_ip"] else {"available": False, "network_lookup": False}
     asn = int(geo.get("asn") or 0) if str(geo.get("asn") or "").isdigit() else 0
     organization = str(geo.get("organization") or "")[:255]
@@ -244,6 +377,26 @@ def analyze_bytes(raw: bytes, *, message_ai: dict | None = None, source_kind: st
     for mech in ("spf", "dkim", "dmarc"):
         if auth.get(mech) in {"fail", "softfail", "permerror", "policy"}:
             infra_signals.append({"code": mech.upper() + "_FAILURE", "weight": 8 if mech != "dmarc" else 12, "detail": f"{mech.upper()}={auth.get(mech)}"})
+
+    # Provider-aware routing exception: a Gmail/Outlook consumer From domain
+    # arriving through its native provider is expected. Custom-domain Google
+    # Workspace/M365 traffic is also represented as provider context, but never
+    # auto-trusted because outbound and inbound hosting can differ.
+    expected_provider = "google" if from_domain in _GOOGLE_CONSUMER_DOMAINS else ("microsoft" if from_domain in _MICROSOFT_CONSUMER_DOMAINS else "")
+    mx_verification = _mx_provider_lookup(from_domain)
+    provider_context = {
+        "from_domain": from_domain,
+        "expected_consumer_provider": expected_provider,
+        "observed_ingress_provider": provider_route.get("ingress_provider", "unknown"),
+        "expected_consumer_provider_match": bool(expected_provider and expected_provider == provider_route.get("ingress_provider")),
+        "mx_provider": mx_verification.get("provider", "unknown"),
+        "mx_targets": mx_verification.get("targets", []),
+        "mx_status": mx_verification.get("status", "UNKNOWN"),
+        "mx_network_lookup": bool(mx_verification.get("network_lookup")),
+        "hosted_provider_match": bool(mx_verification.get("provider") in {"google","microsoft"} and mx_verification.get("provider") == provider_route.get("ingress_provider")),
+        "provider_transitions": provider_route.get("provider_transitions", []),
+        "note": "MX/provider verification is contextual only. Google Workspace/Microsoft 365 custom domains, separate outbound providers, forwarding and hybrid routes are valid exceptions; DNS failure is UNKNOWN, never malicious.",
+    }
 
     history = ai_ti_infrastructure_stats(
         source_ip=transport["source_ip"], asn=asn, sender_domain=from_domain,
@@ -331,7 +484,7 @@ def analyze_bytes(raw: bytes, *, message_ai: dict | None = None, source_kind: st
     return {
         "enabled": True,
         "shadow_only": True,
-        "network_lookup": False,
+        "network_lookup": bool(provider_context.get("mx_network_lookup")),
         "engine_version": ENGINE_VERSION,
         "observation_recorded": stored,
         "infrastructure": {
@@ -345,12 +498,13 @@ def analyze_bytes(raw: bytes, *, message_ai: dict | None = None, source_kind: st
             "asn": asn or None,
             "asn_organization": organization,
             "auth": auth,
+            "provider_context": provider_context,
             "sender_domain": from_domain,
             "reply_domain": reply_domain,
             "message_id_domain": mid_domain,
             "history": history,
             "signals": infra_signals,
-            "limitations": "PTR/HELO uses locally observed Received evidence; no live DNS/reputation lookup is performed.",
+            "limitations": "Provider/hop interpretation combines locally observed Received evidence with bounded cached MX verification. Lower Received blocks may be sender-supplied and outbound routing can differ from MX hosting, so provider transitions/MX matches are contextual and never automatic HAM/SPAM proof. No third-party reputation lookup is performed.",
         },
         "campaign": {
             "status": "OPERATIONAL_LOCAL_CORRELATION",
