@@ -21,8 +21,7 @@ jobs:
       - name: Reassemble and apply R1.1.55 patch
         run: |
           cat tools/r1155-patch/part-* > /tmp/r1155.patch
-          git apply --check /tmp/r1155.patch
-          git apply /tmp/r1155.patch
+          patch -p1 --forward --fuzz=3 --batch < /tmp/r1155.patch
 
       - name: Validate R1.1.55
         env:
